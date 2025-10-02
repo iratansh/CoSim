@@ -1,0 +1,14 @@
+name: cosim
+channels:
+  - conda-forge
+dependencies:
+  - python=3.11
+  - uvicorn
+  - sqlalchemy
+  - asyncpg
+  - psycopg
+  - redis-py
+  - structlog
+  - pip
+  - pip:
+      - -e .
