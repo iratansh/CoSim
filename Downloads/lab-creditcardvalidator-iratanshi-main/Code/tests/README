@@ -1,0 +1,16 @@
+
+The correct answers for these tests provided in the files with same name but '.out' extension
+
+For the sake of this lab, don't make testcases that have more than 16 digits
+We'll not be testing you on any testcase which has more than 16 digits
+
+if you want to make some testcases yourself, then please make sure to have only one testcase in each file.
+Make sure to not make any testcase with more than 16 numbers.
+Make sure that testcases only contain numbers.
+
+to use rars on terminal:
+
+USAGE: rars LABFILE pa TESTFILE 
+TESTFILE is the path to the file that contains the testcase you want to test
+LABFILE is the path to the creditValid.s
+
