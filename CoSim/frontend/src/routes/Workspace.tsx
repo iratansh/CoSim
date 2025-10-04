@@ -1,23 +1,5 @@
-import { useEffect, us  // Handler to run code in simulator
-  const handleRunSimulation = async (code: string, modelPath?: string) => {
-    console.log('🎮 Running code in simulator...', { modelPath });
-    setCurrentSimulationCode(code);
-    setExecutionOutput({ status: 'running', timestamp: new Date().toISOString() });o, useState } from 'react';
-import { useQuery } from '@tanst      const result = await response.json();
-      console.log('✓ Simulation completed:', result);
-      
-      if (result.stdout) console.log('stdout:', result.stdout);
-      if (result.stderr) console.warn('stderr:', result.stderr);
-      if (result.error) console.error('Error:', result.error);
-      
-      // Store execution results in state
-      setExecutionOutput({
-        status: result.status === 'success' ? 'success' : 'error',
-        stdout: result.stdout,
-        stderr: result.stderr,
-        error: result.error,
-        timestamp: new Date().toISOString()
-      });act-query';
+import { useEffect, useMemo, useState } from 'react';
+import { useQuery } from '@tanstack/react-query';
 import { useParams, useNavigate } from 'react-router-dom';
 import { Activity, Box, Cpu, Maximize2, Minimize2, Monitor, Play, Zap } from 'lucide-react';
 
@@ -47,8 +29,9 @@ const WorkspacePage = () => {
 
   // Handler to run code in simulator
   const handleRunSimulation = async (code: string, modelPath?: string) => {
-    console.log('\ud83c\udfae Running code in simulator...', { modelPath });
+    console.log('🎮 Running code in simulator...', { modelPath });
     setCurrentSimulationCode(code);
+    setExecutionOutput({ status: 'running', timestamp: new Date().toISOString() });
     
     const simulationApiUrl = import.meta.env.VITE_SIMULATION_API_URL || 'http://localhost:8005';
     const sessionIdForSim = activeSessionId || 'default-session';
@@ -80,15 +63,6 @@ const WorkspacePage = () => {
       } else {
         console.warn('⚠️ Simulation creation returned:', createResponse.status);
       }
-      
-      if (createResponse.ok) {
-        const createData = await createResponse.json();
-        console.log('✓ Simulation created:', createData);
-      } else if (createResponse.status === 400) {
-        console.log('ℹ️ Simulation already exists, reusing...');
-      } else {
-        console.warn('Simulation creation failed:', createResponse.status);
-      }
 
       // Execute code
       const response = await fetch(`${simulationApiUrl}/simulations/${sessionIdForSim}/execute`, {
@@ -110,12 +84,20 @@ const WorkspacePage = () => {
       }
 
       const result = await response.json();
-      console.log('\u2713 Simulation completed:', result);
+      console.log('✓ Simulation completed:', result);
       
       if (result.stdout) console.log('stdout:', result.stdout);
       if (result.stderr) console.warn('stderr:', result.stderr);
       if (result.error) console.error('Error:', result.error);
       
+      // Store execution results in state
+      setExecutionOutput({
+        status: result.status === 'success' ? 'success' : 'error',
+        stdout: result.stdout,
+        stderr: result.stderr,
+        error: result.error,
+        timestamp: new Date().toISOString()
+      });
     } catch (error) {
       console.error('Failed to run simulation:', error);
       setExecutionOutput({
@@ -633,12 +615,6 @@ const WorkspaceSelector = ({ workspaces, isLoading, isError, activeWorkspaceId, 
   );
 };
 
-interface WorkspaceStatusSummaryProps {
-  workspace: Workspace | null;
-  sessionCount: number;
-  sessionStatus?: Session['status'];
-}
-
 interface StatusCardProps {
   icon: React.ReactNode;
   label: string;
@@ -807,51 +783,6 @@ const LogsPanel = () => (
         📝 System logs and execution output will appear here in real-time.
       </p>
     </div>
-  </div>
-);
-
-interface SummaryBubbleProps {
-  label: string;
-  value: string;
-}
-
-const SummaryBubble = ({ label, value }: SummaryBubbleProps) => (
-  <div
-    style={{
-      flex: '0 1 220px',
-      borderRadius: '12px',
-      border: '1px solid #e2e8f0',
-      padding: '1rem',
-      background: 'linear-gradient(135deg, rgba(102, 126, 234, 0.08), rgba(118, 75, 162, 0.08))'
-    }}
-  >
-    <p style={{ margin: '0 0 0.25rem 0', fontSize: '0.8rem', textTransform: 'uppercase', letterSpacing: '0.05em', color: '#64748b' }}>
-      {label}
-    </p>
-    <p style={{ margin: 0, fontSize: '1.1rem', fontWeight: 600, color: '#312e81' }}>{value}</p>
-  </div>
-);
-
-const SimulationPlaceholder = () => (
-  <div
-    className="card"
-    style={{
-      height: '100%',
-      minHeight: '720px',
-      display: 'flex',
-      flexDirection: 'column',
-      justifyContent: 'center',
-      alignItems: 'center',
-      textAlign: 'center',
-      background: 'linear-gradient(135deg, #f8fafc 0%, #eef2ff 100%)',
-      border: '1px dashed rgba(102, 126, 234, 0.4)'
-    }}
-  >
-    <div style={{ fontSize: '3rem', marginBottom: '1rem' }}>🛰️</div>
-    <h2 style={{ margin: '0 0 0.5rem 0' }}>Simulation stream coming soon</h2>
-    <p style={{ margin: 0, maxWidth: '320px', color: '#475569' }}>
-      We&apos;ll render the shared MuJoCo/PyBullet simulation here once the streaming agents are wired up.
-    </p>
   </div>
 );
 
