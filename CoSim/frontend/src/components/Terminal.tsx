@@ -326,7 +326,7 @@ export const Terminal = ({ sessionId, token, onCommand, height = '300px' }: Term
         height,
         width: '100%',
         background: '#1e1e1e',
-        borderRadius: '8px',
+        borderRadius: 0,
         overflow: 'hidden',
         position: 'relative'
       }}

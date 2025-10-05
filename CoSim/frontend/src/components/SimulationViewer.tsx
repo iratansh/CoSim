@@ -1,5 +1,5 @@
 import { Pause, Play, RotateCcw, Settings, Maximize2, Camera, Download, Share2, Activity } from 'lucide-react';
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 
 interface SimulationViewerProps {
   sessionId: string;
@@ -7,176 +7,267 @@ interface SimulationViewerProps {
   onControl?: (action: 'play' | 'pause' | 'reset' | 'step') => void;
   onRunCode?: () => Promise<void>;
   height?: string;
+  executionOutput?: {
+    status: 'idle' | 'running' | 'success' | 'error';
+    stdout?: string;
+    stderr?: string;
+    error?: string;
+    timestamp?: string;
+  };
 }
 
-export const SimulationViewer = ({ sessionId, engine, onControl, onRunCode, height = '400px' }: SimulationViewerProps) => {
+export const SimulationViewer = ({ sessionId, engine, onControl, onRunCode, height = '400px', executionOutput }: SimulationViewerProps) => {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
+  const wsRef = useRef<WebSocket | null>(null);
+  const reconnectAttemptsRef = useRef(0);
+  const reconnectTimeoutRef = useRef<number | null>(null);
+  const manualCloseRef = useRef(false);
   const [isPlaying, setIsPlaying] = useState(false);
   const [isConnected, setIsConnected] = useState(false);
   const [hasVideoStream, setHasVideoStream] = useState(false);
   const [fps, setFps] = useState(60);
+  const fpsRef = useRef(fps);
   const [showSettings, setShowSettings] = useState(false);
   const [frameCount, setFrameCount] = useState(0);
   const [simulationTime, setSimulationTime] = useState(0);
 
   useEffect(() => {
-    // Initialize WebRTC connection for simulation streaming
-    const initWebRTC = async () => {
-      try {
-        // Simulate connection delay
-        await new Promise(resolve => setTimeout(resolve, 1500));
-        setIsConnected(true);
-        
-        // Try to connect to simulation backend
-        const simulationApiUrl = import.meta.env.VITE_SIMULATION_API_URL || 'http://localhost:8005';
-        
-        // Skip simulation agent connection for now - use canvas rendering directly
-        // TODO: Implement when simulation-agent backend is ready
-        // try {
-        //   const response = await fetch(`${simulationApiUrl}/simulation/${sessionId}/stream`, {
-        //     method: 'POST',
-        //     headers: { 'Content-Type': 'application/json' },
-        //     body: JSON.stringify({ engine, sessionId })
-        //   });
-        //   
-        //   if (response.ok) {
-        //     const data = await response.json();
-        //     // Establish WebRTC connection
-        //     const pc = new RTCPeerConnection(config);
-        //     const stream = await getRemoteStream(sessionId);
-        //     if (videoRef.current) {
-        //       videoRef.current.srcObject = stream;
-        //       setHasVideoStream(true);
-        //       return;
-        //     }
-        //   }
-        // } catch (error) {
-        //   // Fallback to canvas
-        // }
-        
-        // Use canvas rendering (fallback until WebRTC is implemented)
-        startCanvasRendering();
-      } catch (error) {
-        console.error('Failed to connect to simulation stream:', error);
+    fpsRef.current = fps;
+  }, [fps]);
+
+  // Connect to WebSocket for simulation streaming
+  const connectWebSocket = useCallback(() => {
+    if (wsRef.current) {
+      const readyState = wsRef.current.readyState;
+      if (readyState === WebSocket.OPEN || readyState === WebSocket.CONNECTING) {
+        console.log('ℹ️ Simulation stream WebSocket already active');
+        return;
       }
-    };
-
-    const startCanvasRendering = () => {
-      if (!canvasRef.current) return;
-      
-      const canvas = canvasRef.current;
-      const ctx = canvas.getContext('2d');
-      if (!ctx) return;
-      
-      // Set canvas size
-      canvas.width = 800;
-      canvas.height = 600;
-      
-      // Enable canvas rendering
-      setHasVideoStream(true);
-      
-      // Render a simple 3D-like scene
-      const render = () => {
-        if (!isPlaying) return;
-        
-        // Clear canvas
-        ctx.fillStyle = '#0a0a0a';
-        ctx.fillRect(0, 0, canvas.width, canvas.height);
-        
-        // Draw grid
-        ctx.strokeStyle = 'rgba(102, 126, 234, 0.2)';
-        ctx.lineWidth = 1;
-        
-        const gridSize = 40;
-        for (let x = 0; x <= canvas.width; x += gridSize) {
-          ctx.beginPath();
-          ctx.moveTo(x, 0);
-          ctx.lineTo(x, canvas.height);
-          ctx.stroke();
-        }
-        for (let y = 0; y <= canvas.height; y += gridSize) {
-          ctx.beginPath();
-          ctx.moveTo(0, y);
-          ctx.lineTo(canvas.width, y);
-          ctx.stroke();
-        }
-        
-        // Draw animated cube (simple simulation visualization)
-        const time = simulationTime;
-        const centerX = canvas.width / 2;
-        const centerY = canvas.height / 2;
-        const size = 80;
-        
-        // Rotate based on time
-        const rotation = time * 0.5;
-        
-        ctx.save();
-        ctx.translate(centerX, centerY);
-        ctx.rotate(rotation);
-        
-        // Draw cube shadow
-        ctx.fillStyle = 'rgba(0, 0, 0, 0.3)';
-        ctx.fillRect(-size * 0.6, size + 10, size * 1.2, 20);
-        
-        // Draw cube
-        const gradient = ctx.createLinearGradient(-size/2, -size/2, size/2, size/2);
-        gradient.addColorStop(0, '#667eea');
-        gradient.addColorStop(1, '#764ba2');
-        
-        ctx.fillStyle = gradient;
-        ctx.fillRect(-size/2, -size/2, size, size);
-        
-        // Draw cube outline
-        ctx.strokeStyle = '#e2e8f0';
-        ctx.lineWidth = 2;
-        ctx.strokeRect(-size/2, -size/2, size, size);
-        
-        // Draw cube details
-        ctx.strokeStyle = 'rgba(255, 255, 255, 0.3)';
-        ctx.lineWidth = 1;
-        ctx.beginPath();
-        ctx.moveTo(-size/2, 0);
-        ctx.lineTo(size/2, 0);
-        ctx.moveTo(0, -size/2);
-        ctx.lineTo(0, size/2);
-        ctx.stroke();
-        
-        ctx.restore();
-        
-        // Draw info text
-        ctx.fillStyle = '#e2e8f0';
-        ctx.font = '12px monospace';
-        ctx.fillText(`${engine.toUpperCase()} Simulation`, 10, 20);
-        ctx.fillText(`Time: ${simulationTime.toFixed(2)}s`, 10, 40);
-        ctx.fillText(`Frame: ${frameCount}`, 10, 60);
-      };
-      
-      // Render loop
-      const renderLoop = () => {
-        if (isPlaying) {
-          render();
-        }
-        requestAnimationFrame(renderLoop);
-      };
-      renderLoop();
-    };
-
-    initWebRTC();
-
-    // Simulate frame updates when playing
-    let interval: number | null = null;
-    if (isPlaying && isConnected) {
-      interval = window.setInterval(() => {
-        setFrameCount(prev => prev + 1);
-        setSimulationTime(prev => prev + (1 / fps));
-      }, 1000 / fps);
     }
 
-    return () => {
-      if (interval) clearInterval(interval);
+    if (reconnectTimeoutRef.current) {
+      window.clearTimeout(reconnectTimeoutRef.current);
+      reconnectTimeoutRef.current = null;
+    }
+
+    const simulationApiUrl = import.meta.env.VITE_SIMULATION_API_URL || 'http://localhost:8005';
+    const wsUrl = simulationApiUrl.replace('http://', 'ws://').replace('https://', 'wss://');
+    const ws = new WebSocket(`${wsUrl}/simulations/${sessionId}/stream`);
+    
+    ws.binaryType = 'arraybuffer';
+    wsRef.current = ws;
+    manualCloseRef.current = false;
+    
+    ws.onopen = () => {
+      console.log('✅ WebSocket connected to simulation stream');
+      setIsConnected(true);
+      setHasVideoStream(true);
+      setIsPlaying(true);
+      reconnectAttemptsRef.current = 0;
+      
+      // Send play command to start streaming
+      ws.send('play');
     };
-  }, [sessionId, engine, isPlaying, isConnected, fps, simulationTime, frameCount]);
+    
+    ws.onmessage = async (event) => {
+      if (event.data instanceof ArrayBuffer) {
+        // Received frame data
+        const canvas = canvasRef.current;
+        if (!canvas) return;
+        
+        const ctx = canvas.getContext('2d');
+        if (!ctx) return;
+        
+        try {
+          // Convert ArrayBuffer to Blob
+          const blob = new Blob([event.data], { type: 'image/jpeg' });
+          const imageBitmap = await createImageBitmap(blob);
+          
+          // Draw frame to canvas
+          canvas.width = imageBitmap.width;
+          canvas.height = imageBitmap.height;
+          ctx.drawImage(imageBitmap, 0, 0);
+          
+          // Update frame count
+          setFrameCount(prev => prev + 1);
+          setSimulationTime(prev => prev + (1 / fpsRef.current));
+        } catch (error) {
+          console.error('Failed to render frame:', error);
+        }
+      }
+    };
+    
+    ws.onerror = (error) => {
+      console.error('WebSocket error:', error);
+      setIsConnected(false);
+    };
+    
+    ws.onclose = () => {
+      console.log('WebSocket disconnected');
+      setIsConnected(false);
+      setIsPlaying(false);
+      setHasVideoStream(false);
+      wsRef.current = null;
+
+      if (manualCloseRef.current) {
+        manualCloseRef.current = false;
+        reconnectAttemptsRef.current = 0;
+        return;
+      }
+
+      const nextAttempt = reconnectAttemptsRef.current + 1;
+      if (nextAttempt > 5) {
+        console.warn('❌ Maximum WebSocket reconnect attempts reached');
+        reconnectAttemptsRef.current = nextAttempt;
+        return;
+      }
+
+      reconnectAttemptsRef.current = nextAttempt;
+      const delay = Math.min(5000, nextAttempt * 1000);
+      console.log(`🔄 Reconnecting to simulation stream in ${delay}ms (attempt ${nextAttempt})`);
+      reconnectTimeoutRef.current = window.setTimeout(() => {
+        connectWebSocket();
+      }, delay);
+    };
+  }, [sessionId]);
+
+  // Auto-start simulation when code execution completes successfully
+  useEffect(() => {
+    if (executionOutput?.status === 'success') {
+      console.log('🎬 Code execution successful, starting WebSocket stream');
+      connectWebSocket();
+    }
+  }, [executionOutput, connectWebSocket]);
+
+  // Cleanup WebSocket on unmount
+  useEffect(() => {
+    return () => {
+      manualCloseRef.current = true;
+      if (reconnectTimeoutRef.current) {
+        window.clearTimeout(reconnectTimeoutRef.current);
+        reconnectTimeoutRef.current = null;
+      }
+      if (wsRef.current) {
+        wsRef.current.close();
+        wsRef.current = null;
+      }
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!wsRef.current) {
+      return;
+    }
+
+    manualCloseRef.current = true;
+    wsRef.current.close();
+    wsRef.current = null;
+    if (reconnectTimeoutRef.current) {
+      window.clearTimeout(reconnectTimeoutRef.current);
+      reconnectTimeoutRef.current = null;
+    }
+    reconnectAttemptsRef.current = 0;
+    setIsConnected(false);
+    setIsPlaying(false);
+    setHasVideoStream(false);
+  }, [sessionId]);
+
+  useEffect(() => {
+    if (isConnected || hasVideoStream) {
+      return;
+    }
+
+    let animationFrame: number | null = null;
+
+    const canvas = canvasRef.current;
+    const ctx = canvas?.getContext('2d');
+    if (!canvas || !ctx) {
+      return undefined;
+    }
+
+    canvas.width = 800;
+    canvas.height = 600;
+
+    const render = (time: number) => {
+      if (wsRef.current) {
+        return;
+      }
+
+      ctx.fillStyle = '#0a0a0a';
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+      ctx.strokeStyle = 'rgba(102, 126, 234, 0.2)';
+      ctx.lineWidth = 1;
+
+      const gridSize = 40;
+      for (let x = 0; x <= canvas.width; x += gridSize) {
+        ctx.beginPath();
+        ctx.moveTo(x, 0);
+        ctx.lineTo(x, canvas.height);
+        ctx.stroke();
+      }
+      for (let y = 0; y <= canvas.height; y += gridSize) {
+        ctx.beginPath();
+        ctx.moveTo(0, y);
+        ctx.lineTo(canvas.width, y);
+        ctx.stroke();
+      }
+
+      const elapsed = time / 1000;
+      const centerX = canvas.width / 2;
+      const centerY = canvas.height / 2;
+      const size = 80;
+      const rotation = elapsed * 0.5;
+
+      ctx.save();
+      ctx.translate(centerX, centerY);
+      ctx.rotate(rotation);
+
+      ctx.fillStyle = 'rgba(0, 0, 0, 0.3)';
+      ctx.fillRect(-size * 0.6, size + 10, size * 1.2, 20);
+
+      const gradient = ctx.createLinearGradient(-size / 2, -size / 2, size / 2, size / 2);
+      gradient.addColorStop(0, '#667eea');
+      gradient.addColorStop(1, '#764ba2');
+
+      ctx.fillStyle = gradient;
+      ctx.fillRect(-size / 2, -size / 2, size, size);
+
+      ctx.strokeStyle = '#e2e8f0';
+      ctx.lineWidth = 2;
+      ctx.strokeRect(-size / 2, -size / 2, size, size);
+
+      ctx.strokeStyle = 'rgba(255, 255, 255, 0.3)';
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(-size / 2, 0);
+      ctx.lineTo(size / 2, 0);
+      ctx.moveTo(0, -size / 2);
+      ctx.lineTo(0, size / 2);
+      ctx.stroke();
+
+      ctx.restore();
+
+      ctx.fillStyle = '#e2e8f0';
+      ctx.font = '12px monospace';
+      ctx.fillText(`${engine.toUpperCase()} Simulation`, 10, 20);
+      ctx.fillText('Awaiting stream…', 10, 40);
+    };
+
+    const loop = (time: number) => {
+      render(time);
+      animationFrame = requestAnimationFrame(loop);
+    };
+
+    animationFrame = requestAnimationFrame(loop);
+
+    return () => {
+      if (animationFrame !== null) {
+        cancelAnimationFrame(animationFrame);
+      }
+    };
+  }, [sessionId, engine, isConnected, hasVideoStream]);
 
   const handleControl = async (action: 'play' | 'pause' | 'reset' | 'step') => {
     if (action === 'play') {
@@ -190,14 +281,34 @@ export const SimulationViewer = ({ sessionId, engine, onControl, onRunCode, heig
           return; // Don't start playing if code failed
         }
       }
-      setIsPlaying(true);
-      setHasVideoStream(true); // Enable video stream when playing
+      
+      // Send play command via WebSocket if connected
+      if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+        wsRef.current.send('play');
+      } else {
+        // If not connected, establish WebSocket connection
+        connectWebSocket();
+      }
     }
-    if (action === 'pause') setIsPlaying(false);
+    
+    if (action === 'pause') {
+      setIsPlaying(false);
+      
+      // Send pause command via WebSocket
+      if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+        wsRef.current.send('pause');
+      }
+    }
+    
     if (action === 'reset') {
       setIsPlaying(false);
       setFrameCount(0);
       setSimulationTime(0);
+      
+      // Send reset command via WebSocket
+      if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+        wsRef.current.send('reset');
+      }
       
       // Clear canvas
       if (canvasRef.current) {
@@ -208,7 +319,10 @@ export const SimulationViewer = ({ sessionId, engine, onControl, onRunCode, heig
         }
       }
     }
-    onControl?.(action);
+    
+    if (onControl) {
+      onControl(action);
+    }
   };
 
   return (

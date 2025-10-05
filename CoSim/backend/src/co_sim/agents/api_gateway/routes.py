@@ -34,6 +34,12 @@ async def get_current_user(request: Request) -> Any:
     return response.json()
 
 
+@router.post("/auth/auth0/exchange")
+async def exchange_auth0_token(request: Request) -> Any:
+    response = await forward_request(request, "auth", "/v1/auth/auth0/exchange", method="POST")
+    return response.json()
+
+
 @router.post("/sessions")
 async def create_session(request: Request, payload: dict[str, Any] = Body(default_factory=dict)) -> Any:
     response = await forward_request(request, "session", "/v1/sessions", method="POST", json=payload)

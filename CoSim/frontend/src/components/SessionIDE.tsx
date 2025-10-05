@@ -9,7 +9,7 @@ import FileTree, { FileNode } from './FileTree';
 import Terminal from './Terminal';
 import { buildCpp, executeBinary, executePython } from '../api/execution';
 import { listWorkspaceFiles, upsertWorkspaceFile } from '../api/workspaceFiles';
-import { Upload, FolderUp, Play } from 'lucide-react';
+import { Upload, FolderUp } from 'lucide-react';
 
 const AUTO_SAVE_INTERVAL_MS = 3000;
 const PLACEHOLDER_WORKSPACE_PREFIX = 'placeholder';
@@ -63,8 +63,9 @@ def main():
     state = sim.reset()
     print(f"✓ Initial angle: {state['qpos'][1]:.3f} rad")
     
-    # Run simulation loop
-    for i in range(500):
+    # Run simulation loop continuously
+    i = 0
+    while True:  # Continuous simulation
         state = sim.get_state()
         action = controller.compute_action(state)
         state = sim.step(np.array([action]))
@@ -72,13 +73,19 @@ def main():
         if i % 50 == 0:
             print(f"Step {i:3d} | Pole: {state['qpos'][1]:+.3f}rad")
         
+        # Check if pole fell - reset if needed
         if abs(state['qpos'][1]) > 0.5:
-            print(f"❌ Pole fell at step {i}!")
-            break
-    else:
-        print(f"✓ Balanced for 500 steps!")
+            print(f"⚠️ Pole fell at step {i}, resetting...")
+            state = sim.reset()
+        
+        i += 1
+        
+        # Small delay to prevent overwhelming (60 FPS)
+        if i % 1000 == 0:
+            print(f"✓ Still running smoothly at step {i}!")
     
-    print(f"🏁 Finished at t={state['time']:.2f}s")
+    print(f"🏁 Simulation ended")  # This won't be reached
+
 
 if __name__ == "__main__":
     main()
@@ -144,6 +151,9 @@ if __name__ == "__main__":
     language: 'text'
   }
 ];
+
+const PANEL_TABS = ['Terminal', 'Output', 'Debug Console', 'Problems'] as const;
+type PanelTab = typeof PANEL_TABS[number];
 
 const inferLanguage = (path: string, explicit?: string | null): SupportedLanguage => {
   if (explicit === 'python' || explicit === 'cpp' || explicit === 'text') {
@@ -249,7 +259,6 @@ const SessionIDE = ({
   const [isExecuting, setIsExecuting] = useState(false);
   const [isBuilding, setIsBuilding] = useState(false);
   const [lastBinary, setLastBinary] = useState<string | null>(null);
-  const [isRunningInSimulator, setIsRunningInSimulator] = useState(false);
   const [isLoadingFiles, setIsLoadingFiles] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [autoSaveStatus, setAutoSaveStatus] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle');
@@ -257,6 +266,10 @@ const SessionIDE = ({
   const [lastSavedAt, setLastSavedAt] = useState<Date | null>(null);
   const [showMinimap, setShowMinimap] = useState(true);
   const [editorTheme, setEditorTheme] = useState<'vs-dark' | 'vs-light'>('vs-dark');
+  const [openTabs, setOpenTabs] = useState<string[]>([]);
+  const [cursorPosition, setCursorPosition] = useState({ line: 1, column: 1 });
+  const [activeActivity, setActiveActivity] = useState('Explorer');
+  const [activePanelTab, setActivePanelTab] = useState<PanelTab>('Terminal');
 
   const editorRef = useRef<monaco.editor.IStandaloneCodeEditor | null>(null);
   const ydocRef = useRef<Y.Doc | null>(null);
@@ -300,6 +313,152 @@ const SessionIDE = ({
     [toolbarButtonBase]
   );
 
+  const activityItems = useMemo(
+    () => [
+      { icon: '📁', label: 'Explorer' },
+      { icon: '🔍', label: 'Search' },
+      { icon: '🔀', label: 'Source Control' },
+      { icon: '🐞', label: 'Debug' },
+      { icon: '🧩', label: 'Extensions' }
+    ],
+    []
+  );
+
+  const dirtyTabs = useMemo(() => {
+    const dirty = new Set<string>();
+    openTabs.forEach(path => {
+      if ((fileContents[path] ?? '') !== (savedContentsRef.current[path] ?? '')) {
+        dirty.add(path);
+      }
+    });
+    return dirty;
+  }, [openTabs, fileContents]);
+
+  useEffect(() => {
+    if (!selectedFile && openTabs.length > 0) {
+      setSelectedFile(openTabs[0]);
+    }
+    if (selectedFile && openTabs.length > 0 && !openTabs.includes(selectedFile)) {
+      setSelectedFile(openTabs[0]);
+    }
+  }, [openTabs, selectedFile]);
+
+  useEffect(() => {
+    const editor = editorRef.current;
+    if (editor) {
+      const position = editor.getPosition();
+      if (position) {
+        setCursorPosition({ line: position.lineNumber, column: position.column });
+      }
+    }
+  }, [selectedFile]);
+
+  const handleTabSelect = useCallback((path: string) => {
+    setSelectedFile(path);
+  }, []);
+
+  const handleTabClose = useCallback(
+    (path: string, event?: React.MouseEvent) => {
+      if (event) {
+        event.stopPropagation();
+        event.preventDefault();
+      }
+      setOpenTabs(prev => {
+        const index = prev.indexOf(path);
+        const nextTabs = prev.filter(tab => tab !== path);
+        if (path === selectedFile) {
+          const fallback = nextTabs[index - 1] ?? nextTabs[index] ?? null;
+          setSelectedFile(fallback ?? null);
+        }
+        return nextTabs;
+      });
+    },
+    [selectedFile]
+  );
+
+  useEffect(() => {
+    const disposables: monaco.IDisposable[] = [];
+
+    type SuggestionConfig = Omit<monaco.languages.CompletionItem, 'range'> & {
+      insertTextRules?: monaco.languages.CompletionItemInsertTextRule;
+    };
+
+    const registerProvider = (language: string, suggestions: SuggestionConfig[]) => {
+      disposables.push(
+        monaco.languages.registerCompletionItemProvider(language, {
+          triggerCharacters: ['.', ':', '<', ' '],
+          provideCompletionItems: (model, position) => {
+            const word = model.getWordUntilPosition(position);
+            const range: monaco.IRange = {
+              startLineNumber: position.lineNumber,
+              endLineNumber: position.lineNumber,
+              startColumn: word.startColumn,
+              endColumn: word.endColumn
+            };
+
+            return {
+              suggestions: suggestions.map(suggestion => ({
+                ...suggestion,
+                range
+              }))
+            };
+          }
+        })
+      );
+    };
+
+    registerProvider('python', [
+      {
+        label: 'print',
+        kind: monaco.languages.CompletionItemKind.Function,
+        documentation: 'Print a message to stdout.',
+        insertText: "print(${1:'Hello CoSim'})",
+        insertTextRules: monaco.languages.CompletionItemInsertTextRule.InsertAsSnippet
+      },
+      {
+        label: 'async def',
+        kind: monaco.languages.CompletionItemKind.Snippet,
+        documentation: 'Create an async function scaffold.',
+        insertText: 'async def ${1:name}(${2:args}):\n    ${3:pass}\n',
+        insertTextRules: monaco.languages.CompletionItemInsertTextRule.InsertAsSnippet
+      },
+      {
+        label: 'main guard',
+        kind: monaco.languages.CompletionItemKind.Snippet,
+        documentation: 'Standard Python __main__ guard pattern.',
+        insertText: "if __name__ == '__main__':\n    ${1:main()}\n",
+        insertTextRules: monaco.languages.CompletionItemInsertTextRule.InsertAsSnippet
+      }
+    ]);
+
+    registerProvider('cpp', [
+      {
+        label: 'cout',
+        kind: monaco.languages.CompletionItemKind.Snippet,
+        documentation: 'Stream output helper.',
+        insertText: 'std::cout << ${1:\"Hello CoSim\"} << std::endl;',
+        insertTextRules: monaco.languages.CompletionItemInsertTextRule.InsertAsSnippet
+      },
+      {
+        label: 'main()',
+        kind: monaco.languages.CompletionItemKind.Snippet,
+        documentation: 'C++ main function template.',
+        insertText: 'int main(int argc, char** argv) {\n    ${1:return 0;}\n}\n',
+        insertTextRules: monaco.languages.CompletionItemInsertTextRule.InsertAsSnippet
+      },
+      {
+        label: '#include <iostream>',
+        kind: monaco.languages.CompletionItemKind.Text,
+        documentation: 'Include the iostream header.',
+        insertText: '#include <iostream>'
+      }
+    ]);
+
+    return () => {
+      disposables.forEach(disposable => disposable.dispose());
+    };
+  }, []);
+
   const normalizedFiles = useCallback((entries: WorkspaceFileDescriptor[]) => {
     return entries.map(entry => ({
       ...entry,
@@ -319,12 +478,22 @@ const SessionIDE = ({
       setFileContents(contents);
       setFiles(buildFileTree(normalized));
 
+      const availablePaths = normalized.map(file => file.path);
+      const defaultFile = normalized.find(file => file.path.endsWith('.py') || file.path.endsWith('.cpp')) || normalized[0];
+
+      setOpenTabs(prev => {
+        const filtered = prev.filter(path => availablePaths.includes(path));
+        if (filtered.length > 0) {
+          return filtered;
+        }
+        return defaultFile ? [defaultFile.path] : [];
+      });
+
       setSelectedFile(prev => {
-        if (prev && contents[prev] !== undefined) {
+        if (prev && availablePaths.includes(prev)) {
           return prev;
         }
-        const firstFile = normalized.find(file => file.path.endsWith('.py') || file.path.endsWith('.cpp')) || normalized[0];
-        return firstFile ? firstFile.path : null;
+        return defaultFile ? defaultFile.path : null;
       });
     },
     [normalizedFiles]
@@ -436,12 +605,110 @@ const SessionIDE = ({
   }, [fileContents, selectedFile]);
   const breadcrumbs = useMemo(() => (selectedFile ? selectedFile.split('/').filter(Boolean) : []), [selectedFile]);
   const isDarkTheme = editorTheme === 'vs-dark';
+  const activityButtonStyle: CSSProperties = {
+    width: 36,
+    height: 36,
+    borderRadius: '8px',
+    border: 'none',
+    background: 'transparent',
+    color: '#9ca3af',
+    cursor: 'pointer',
+    fontSize: '1.1rem',
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    transition: 'background 0.15s ease, color 0.15s ease'
+  };
+
+  const tabStyle = useCallback(
+    (active: boolean): CSSProperties => ({
+      display: 'flex',
+      alignItems: 'center',
+      gap: '0.45rem',
+      padding: '0.55rem 0.9rem',
+      cursor: 'pointer',
+      backgroundColor: active ? '#1e1e1e' : '#2c2c2c',
+      color: active ? '#f8fafc' : '#d1d5db',
+      borderRight: '1px solid #3a3a3a',
+      position: 'relative',
+      maxWidth: 220
+    }),
+    []
+  );
+
+  const tabCloseButtonStyle: CSSProperties = {
+    border: 'none',
+    background: 'transparent',
+    color: '#9ca3af',
+    cursor: 'pointer',
+    fontSize: '0.75rem',
+    lineHeight: 1,
+    padding: 0,
+    display: 'inline-flex',
+    alignItems: 'center'
+  };
+
+  const autoSaveSummary = useMemo(() => {
+    switch (autoSaveStatus) {
+      case 'saving':
+        return 'Auto Save: Saving…';
+      case 'saved':
+        return 'Auto Save: Saved';
+      case 'error':
+        return 'Auto Save: Error';
+      default:
+        return 'Auto Save: Idle';
+    }
+  }, [autoSaveStatus]);
+
+  const statusLeft = useMemo(
+    () => [
+      `Ln ${cursorPosition.line}, Col ${cursorPosition.column}`,
+      'Spaces: 4',
+      'UTF-8',
+      'LF',
+      currentLanguage ? currentLanguage.toUpperCase() : undefined
+    ].filter(Boolean) as string[],
+    [cursorPosition, currentLanguage]
+  );
+
+  const statusRight = useMemo(
+    () => [
+      autoSaveSummary,
+      showMinimap ? 'Minimap On' : 'Minimap Off',
+      isDarkTheme ? 'Dark Theme' : 'Light Theme',
+      workspaceId ? `Workspace ${workspaceId}` : undefined,
+      sessionId ? `Session ${sessionId}` : undefined
+    ].filter(Boolean) as string[],
+    [autoSaveSummary, showMinimap, isDarkTheme, workspaceId, sessionId]
+  );
 
   useEffect(() => {
     return () => {
-      bindingRef.current?.destroy();
-      providerRef.current?.destroy();
-      ydocRef.current?.destroy();
+      if (bindingRef.current) {
+        try {
+          bindingRef.current.destroy();
+        } catch (error) {
+          console.warn('Failed to dispose Monaco binding', error);
+        }
+        bindingRef.current = null;
+      }
+      if (providerRef.current) {
+        try {
+          providerRef.current.destroy();
+        } catch (error) {
+          console.warn('Failed to dispose Yjs provider', error);
+        }
+        providerRef.current = null;
+      }
+      if (ydocRef.current) {
+        try {
+          ydocRef.current.destroy();
+        } catch (error) {
+          console.warn('Failed to dispose Yjs document', error);
+        }
+        ydocRef.current = null;
+      }
     };
   }, [selectedFile]);
 
@@ -459,6 +726,7 @@ const SessionIDE = ({
   const handleFileSelect = (file: FileNode) => {
     if (file.type === 'file') {
       setSelectedFile(file.path);
+      setOpenTabs(prev => (prev.includes(file.path) ? prev : [...prev, file.path]));
     }
   };
 
@@ -680,6 +948,19 @@ const SessionIDE = ({
       editor.addCommand(monacoInstance.KeyMod.CtrlCmd | monacoInstance.KeyCode.KeyS, () => {
         void handleSave();
       });
+
+      const cursorDisposable = editor.onDidChangeCursorPosition(event => {
+        setCursorPosition({ line: event.position.lineNumber, column: event.position.column });
+      });
+
+      editor.onDidDispose(() => {
+        cursorDisposable.dispose();
+      });
+
+      const initialPosition = editor.getPosition();
+      if (initialPosition) {
+        setCursorPosition({ line: initialPosition.lineNumber, column: initialPosition.column });
+      }
     },
     [enableCollaboration, handleSave, selectedFile, workspaceId]
   );
@@ -773,7 +1054,6 @@ const SessionIDE = ({
       return;
     }
 
-    setIsRunningInSimulator(true);
     try {
       const token = localStorage.getItem('token');
       if (!token) {
@@ -857,8 +1137,6 @@ const SessionIDE = ({
 
     } catch (error) {
       console.error('Failed to run in simulator:', error);
-    } finally {
-      setIsRunningInSimulator(false);
     }
   };
 
@@ -1085,186 +1363,330 @@ const SessionIDE = ({
 
   if (isLoadingFiles) {
     return (
-      <div style={{
-        display: 'flex',
-        alignItems: 'center',
-        justifyContent: 'center',
-        height: '100%',
-        backgroundColor: '#1e1e1e',
-        color: '#cccccc',
-        fontSize: '1rem'
-      }}>
+      <div
+        style={{
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          height: '100%',
+          backgroundColor: '#1e1e1e',
+          color: '#d4d4d8',
+          fontSize: '0.95rem'
+        }}
+      >
         Loading workspace files…
       </div>
     );
   }
 
-  return (
-    <div style={{ display: 'flex', height: '100%', backgroundColor: '#1e1e1e' }}>
-      <div
-        style={{
-          width: '240px',
-          backgroundColor: '#252526',
-          borderRight: '1px solid #3e3e42',
-          overflow: 'auto'
-        }}
-      >
-        <div
-          style={{
-            padding: '0.75rem 1rem',
-            borderBottom: '1px solid #3e3e42',
-            color: '#cccccc',
-            fontSize: '0.85rem',
-            fontWeight: 600,
-            textTransform: 'uppercase',
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'space-between'
-          }}
-        >
-          <span>Explorer</span>
-          <div style={{ display: 'flex', gap: '0.5rem' }}>
-            <button
-              onClick={() => fileInputRef.current?.click()}
-              style={{
-                background: 'transparent',
-                border: '1px solid #3e3e42',
-                borderRadius: '4px',
-                padding: '0.25rem 0.5rem',
-                color: '#cccccc',
-                cursor: 'pointer',
-                display: 'flex',
-                alignItems: 'center',
-                gap: '0.25rem',
-                fontSize: '0.75rem',
-                transition: 'background 0.15s ease, border-color 0.15s ease'
-              }}
-              onMouseEnter={(e) => {
-                e.currentTarget.style.background = '#2d2d30';
-                e.currentTarget.style.borderColor = '#007acc';
-              }}
-              onMouseLeave={(e) => {
-                e.currentTarget.style.background = 'transparent';
-                e.currentTarget.style.borderColor = '#3e3e42';
-              }}
-              title="Upload Files"
-            >
-              <Upload size={14} />
-              Files
-            </button>
-            <button
-              onClick={() => folderInputRef.current?.click()}
-              style={{
-                background: 'transparent',
-                border: '1px solid #3e3e42',
-                borderRadius: '4px',
-                padding: '0.25rem 0.5rem',
-                color: '#cccccc',
-                cursor: 'pointer',
-                display: 'flex',
-                alignItems: 'center',
-                gap: '0.25rem',
-                fontSize: '0.75rem',
-                transition: 'background 0.15s ease, border-color 0.15s ease'
-              }}
-              onMouseEnter={(e) => {
-                e.currentTarget.style.background = '#2d2d30';
-                e.currentTarget.style.borderColor = '#007acc';
-              }}
-              onMouseLeave={(e) => {
-                e.currentTarget.style.background = 'transparent';
-                e.currentTarget.style.borderColor = '#3e3e42';
-              }}
-              title="Upload Folder"
-            >
-              <FolderUp size={14} />
-              Folder
-            </button>
-          </div>
-        </div>
-        
-        {/* Hidden file inputs */}
-        <input
-          ref={fileInputRef}
-          type="file"
-          multiple
-          onChange={handleFileUpload}
-          style={{ display: 'none' }}
-        />
-        <input
-          ref={folderInputRef}
-          type="file"
-          {...({ webkitdirectory: '', directory: '' } as any)}
-          onChange={handleFolderUpload}
-          style={{ display: 'none' }}
-        />
-        
-        <FileTree files={files} selectedFile={selectedFile} onFileSelect={handleFileSelect} />
-      </div>
+  const shellStyle: CSSProperties = {
+    display: 'flex',
+    flexDirection: 'column',
+    height: '100%',
+    backgroundColor: '#1f1f1f',
+    color: '#d4d4d8',
+    fontFamily: '"Segoe UI", "SFMono-Regular", system-ui, sans-serif'
+  };
 
-      <div style={{ flex: 1, display: 'flex', flexDirection: 'column' }}>
-        <div style={{ flex: layout === 'editor-only' ? 1 : 0.6, display: 'flex', flexDirection: 'column' }}>
+  const activityBarStyle: CSSProperties = {
+    width: 54,
+    backgroundColor: '#202123',
+    display: 'flex',
+    flexDirection: 'column',
+    alignItems: 'center',
+    padding: '0.65rem 0.5rem',
+    gap: '0.45rem',
+    borderRight: '1px solid #1b1b1d'
+  };
+
+  const sideBarStyle: CSSProperties = {
+    width: 260,
+    backgroundColor: '#252526',
+    borderRight: '1px solid #1b1b1d',
+    display: 'flex',
+    flexDirection: 'column',
+    overflow: 'hidden',
+    color: '#d4d4d8'
+  };
+
+  const sectionHeaderStyle: CSSProperties = {
+    padding: '0.65rem 1rem',
+    fontSize: '0.72rem',
+    letterSpacing: '0.12em',
+    fontWeight: 600,
+    color: '#9da5b4',
+    textTransform: 'uppercase'
+  };
+
+  const openEditorItemStyle = (active: boolean): CSSProperties => ({
+    display: 'flex',
+    alignItems: 'center',
+    gap: '0.45rem',
+    padding: '0.35rem 1rem',
+    cursor: 'pointer',
+    backgroundColor: active ? '#37373d' : 'transparent',
+    color: active ? '#f3f4f6' : '#d4d4d8',
+    borderLeft: active ? '2px solid #007acc' : '2px solid transparent',
+    fontSize: '0.85rem'
+  });
+
+  const sideActionButtonStyle: CSSProperties = {
+    width: 32,
+    height: 32,
+    borderRadius: '6px',
+    border: '1px solid #2f2f2f',
+    background: '#2a2d2e',
+    color: '#cbd5f5',
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    cursor: 'pointer'
+  };
+
+  const panelButtonStyle: CSSProperties = {
+    width: 26,
+    height: 26,
+    borderRadius: '4px',
+    border: '1px solid #2f2f2f',
+    background: '#2a2d2e',
+    color: '#cbd5f5',
+    fontSize: '0.75rem',
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    cursor: 'pointer'
+  };
+
+  const panelTabStyle = (active: boolean): CSSProperties => ({
+    height: 24,
+    padding: '0 0.75rem',
+    borderRadius: '4px',
+    border: 'none',
+    fontSize: '0.75rem',
+    textTransform: 'uppercase',
+    cursor: 'pointer',
+    backgroundColor: active ? '#1e1e1e' : 'transparent',
+    color: active ? '#f3f4f6' : '#9da5b4'
+  });
+
+  const statusBarStyle: CSSProperties = {
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    backgroundColor: '#007acc',
+    color: '#f3f4f6',
+    padding: '0 1rem',
+    height: 24,
+    fontSize: '0.75rem'
+  };
+
+  return (
+    <div style={shellStyle}>
+      <div style={{ display: 'flex', flex: 1, overflow: 'hidden' }}>
+        <aside style={activityBarStyle}>
+          {activityItems.map(item => {
+            const isActive = activeActivity === item.label;
+            return (
+              <button
+                key={item.label}
+                title={item.label}
+                style={{
+                  ...activityButtonStyle,
+                  background: isActive ? '#3b3d42' : 'transparent',
+                  color: isActive ? '#f3f4f6' : '#9ca3af',
+                  borderLeft: isActive ? '2px solid #007acc' : '2px solid transparent'
+                }}
+                onClick={() => setActiveActivity(item.label)}
+              >
+                <span aria-hidden="true">{item.icon}</span>
+              </button>
+            );
+          })}
+          <div
+            style={{
+              marginTop: 'auto',
+              fontSize: '0.7rem',
+              color: '#6b7280',
+              writingMode: 'vertical-rl',
+              transform: 'rotate(180deg)',
+              letterSpacing: '0.25em'
+            }}
+          >
+            CO·SIM
+          </div>
+        </aside>
+
+        <aside style={sideBarStyle}>
+          <div style={sectionHeaderStyle}>Explorer</div>
+          {activeActivity === 'Explorer' ? (
+            <>
+              <div style={{ display: 'flex', justifyContent: 'space-between', padding: '0 1rem 0.75rem', gap: '0.5rem' }}>
+                <button
+                  onClick={() => fileInputRef.current?.click()}
+                  style={sideActionButtonStyle}
+                  title="Upload file(s)"
+                >
+                  <Upload size={16} />
+                </button>
+                <button
+                  onClick={() => folderInputRef.current?.click()}
+                  style={sideActionButtonStyle}
+                  title="Upload folder"
+                >
+                  <FolderUp size={16} />
+                </button>
+              </div>
+
+              <div style={{ borderTop: '1px solid #2f2f2f', borderBottom: '1px solid #2f2f2f' }}>
+                <div style={sectionHeaderStyle}>Open Editors</div>
+                <div>
+                  {openTabs.length === 0 ? (
+                    <div style={{ padding: '0.35rem 1rem', fontSize: '0.75rem', color: '#7c8187' }}>
+                      No editors open
+                    </div>
+                  ) : (
+                    openTabs.map(path => {
+                      const isActive = selectedFile === path;
+                      const isDirtyTab = dirtyTabs.has(path);
+                      const name = path.split('/').pop() ?? path;
+                      return (
+                        <div
+                          key={`open-${path}`}
+                          onClick={() => handleTabSelect(path)}
+                          style={openEditorItemStyle(isActive)}
+                        >
+                          <span
+                            style={{
+                              flex: 1,
+                              overflow: 'hidden',
+                              textOverflow: 'ellipsis',
+                              whiteSpace: 'nowrap',
+                              textAlign: 'left'
+                            }}
+                          >
+                            {name}
+                          </span>
+                          {isDirtyTab && <span style={{ color: '#facc15', fontSize: '0.7rem' }}>●</span>}
+                          <button
+                            onClick={(event) => handleTabClose(path, event)}
+                            style={{
+                              border: 'none',
+                              background: 'transparent',
+                              color: '#9ca3af',
+                              cursor: 'pointer',
+                              fontSize: '0.75rem'
+                            }}
+                          >
+                            ×
+                          </button>
+                        </div>
+                      );
+                    })
+                  )}
+                </div>
+              </div>
+
+              <input
+                ref={fileInputRef}
+                type="file"
+                multiple
+                onChange={handleFileUpload}
+                style={{ display: 'none' }}
+              />
+              <input
+                ref={folderInputRef}
+                type="file"
+                {...({ webkitdirectory: '', directory: '' } as any)}
+                onChange={handleFolderUpload}
+                style={{ display: 'none' }}
+              />
+
+              <div style={{ flex: 1, overflowY: 'auto', padding: '0.35rem 0.5rem 1rem' }}>
+                <FileTree files={files} selectedFile={selectedFile} onFileSelect={handleFileSelect} />
+              </div>
+            </>
+          ) : (
+            <div style={{ padding: '1rem', fontSize: '0.85rem', color: '#9da5b4' }}>
+              {activeActivity} view coming soon.
+            </div>
+          )}
+        </aside>
+
+        <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden', backgroundColor: '#1e1e1e' }}>
+          <div style={{ display: 'flex', alignItems: 'center', borderBottom: '1px solid #1f1f1f', backgroundColor: '#2d2d2d' }}>
+            <div style={{ display: 'flex', alignItems: 'stretch', flex: 1, overflowX: 'auto' }}>
+              {openTabs.length === 0 ? (
+                <div style={{ padding: '0.5rem 1rem', color: '#9ca3af', fontSize: '0.8rem' }}>No file open</div>
+              ) : (
+                openTabs.map(path => {
+                  const name = path.split('/').pop() ?? path;
+                  const isActive = selectedFile === path;
+                  const isDirtyTab = dirtyTabs.has(path);
+                  return (
+                    <div
+                      key={`tab-${path}`}
+                      style={tabStyle(isActive)}
+                      onClick={() => handleTabSelect(path)}
+                    >
+                      <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{name}</span>
+                      {isDirtyTab && <span style={{ color: '#facc15', fontSize: '0.65rem' }}>●</span>}
+                      <button
+                        onClick={(event) => handleTabClose(path, event)}
+                        style={{ ...tabCloseButtonStyle, color: isActive ? '#f3f4f6' : '#9ca3af' }}
+                        title="Close"
+                      >
+                        ×
+                      </button>
+                    </div>
+                  );
+                })
+              )}
+            </div>
+          </div>
+
           <div
             style={{
               display: 'flex',
-              flexWrap: 'wrap',
-              gap: '1rem',
               alignItems: 'center',
               justifyContent: 'space-between',
-              padding: '0.75rem 1rem',
-              backgroundColor: '#1b1b1f',
-              borderBottom: '1px solid #3e3e42'
+              padding: '0.6rem 1rem',
+              backgroundColor: '#1e1e1e',
+              borderBottom: '1px solid #1f1f1f',
+              gap: '1rem',
+              flexWrap: 'wrap'
             }}
           >
-            <div style={{ display: 'flex', alignItems: 'center', gap: '0.85rem', minWidth: 0, flex: '1 1 320px' }}>
-              <div
-                style={{
-                  width: 36,
-                  height: 36,
-                  borderRadius: '10px',
-                  background: 'linear-gradient(135deg, #4f46e5 0%, #7c3aed 100%)',
-                  display: 'flex',
-                  alignItems: 'center',
-                  justifyContent: 'center',
-                  fontWeight: 600,
-                  color: '#f8fafc',
-                  textTransform: 'uppercase'
-                }}
-              >
-                {currentFile ? currentFile.name.split('.').pop() : '--'}
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '0.2rem', minWidth: 0 }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', color: '#f3f4f6', fontWeight: 600 }}>
+                {currentFile?.name ?? 'Select a file'}
+                {isDirty && <span style={{ color: '#facc15', fontSize: '0.75rem' }}>●</span>}
+                {currentLanguage && (
+                  <span
+                    style={{
+                      fontSize: '0.7rem',
+                      textTransform: 'uppercase',
+                      letterSpacing: '0.08em',
+                      background: 'rgba(148, 163, 184, 0.15)',
+                      borderRadius: '999px',
+                      padding: '0.1rem 0.45rem',
+                      color: '#94a3b8'
+                    }}
+                  >
+                    {currentLanguage}
+                  </span>
+                )}
               </div>
-              <div style={{ minWidth: 0, flex: '1 1 auto' }}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', fontSize: '1rem', color: '#f8fafc', fontWeight: 600, flexWrap: 'wrap' }}>
-                  {currentFile?.name ?? 'Select a file'}
-                  {isDirty && <span style={{ color: '#facc15', fontSize: '0.75rem' }}>● unsaved</span>}
-                  {currentLanguage && (
-                    <span
-                      style={{
-                        fontSize: '0.7rem',
-                        letterSpacing: '0.08em',
-                        textTransform: 'uppercase',
-                        background: 'rgba(148, 163, 184, 0.15)',
-                        borderRadius: '999px',
-                        padding: '0.15rem 0.5rem',
-                        color: '#94a3b8'
-                      }}
-                    >
-                      {currentLanguage}
-                    </span>
-                  )}
-                </div>
-                <div style={{ color: '#94a3b8', fontSize: '0.8rem', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                  {breadcrumbs.length > 0 ? breadcrumbs.join(' / ') : 'workspace'}
-                </div>
+              <div style={{ color: '#9ca3af', fontSize: '0.78rem', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                {breadcrumbs.length > 0 ? breadcrumbs.join(' / ') : 'workspace'}
               </div>
             </div>
 
-            <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: '0.6rem', flex: '1 1 260px' }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', flexWrap: 'wrap', justifyContent: 'flex-end' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', flexWrap: 'wrap', justifyContent: 'flex-end', flex: '1 1 auto' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '0.45rem', flexWrap: 'wrap' }}>
                 <button
                   style={{
                     ...toolbarButtonBase,
-                    opacity: selectedFile ? 1 : 0.6,
+                    opacity: selectedFile ? 1 : 0.5,
                     cursor: selectedFile ? 'pointer' : 'not-allowed'
                   }}
                   onClick={() => void handleSave()}
@@ -1276,7 +1698,7 @@ const SessionIDE = ({
                 <button
                   style={{
                     ...toolbarButtonBase,
-                    opacity: selectedFile && currentLanguage !== 'text' ? 1 : 0.6,
+                    opacity: selectedFile && currentLanguage !== 'text' ? 1 : 0.5,
                     cursor: selectedFile && currentLanguage !== 'text' ? 'pointer' : 'not-allowed'
                   }}
                   onClick={handleFormatDocument}
@@ -1288,9 +1710,9 @@ const SessionIDE = ({
                 <button
                   style={{
                     ...toolbarButtonBase,
-                    background: showMinimap ? 'rgba(56, 189, 248, 0.18)' : 'transparent',
-                    borderColor: showMinimap ? 'rgba(56, 189, 248, 0.45)' : '#3e3e42',
-                    color: showMinimap ? '#f8fafc' : '#d0d0d0'
+                    background: showMinimap ? 'rgba(0, 122, 204, 0.18)' : 'transparent',
+                    borderColor: showMinimap ? '#007acc' : '#3e3e42',
+                    color: showMinimap ? '#e5f2ff' : '#d0d0d0'
                   }}
                   onClick={handleMinimapToggle}
                   title="Toggle minimap"
@@ -1300,10 +1722,8 @@ const SessionIDE = ({
                 <button
                   style={{
                     ...toolbarButtonBase,
-                    background: isDarkTheme
-                      ? 'linear-gradient(135deg, rgba(99, 102, 241, 0.25), rgba(129, 140, 248, 0.35))'
-                      : 'rgba(15, 23, 42, 0.12)',
-                    borderColor: isDarkTheme ? 'rgba(129, 140, 248, 0.45)' : '#cbd5f5',
+                    background: isDarkTheme ? 'linear-gradient(135deg, rgba(76, 106, 219, 0.35), rgba(129, 140, 248, 0.35))' : 'rgba(15, 23, 42, 0.1)',
+                    borderColor: isDarkTheme ? 'rgba(129, 140, 248, 0.65)' : '#cbd5f5',
                     color: isDarkTheme ? '#f8fafc' : '#0f172a'
                   }}
                   onClick={handleThemeToggle}
@@ -1315,10 +1735,8 @@ const SessionIDE = ({
                   <button
                     style={{
                       ...toolbarButtonBase,
-                      background: isExecuting
-                        ? 'rgba(148, 163, 184, 0.25)'
-                        : 'linear-gradient(135deg, #0dbc79 0%, #23d18b 100%)',
-                      borderColor: 'rgba(17, 94, 89, 0.6)',
+                      background: isExecuting ? 'rgba(148, 163, 184, 0.25)' : 'linear-gradient(135deg, #0dbc79 0%, #23d18b 100%)',
+                      borderColor: '#0b6e4f',
                       color: '#032d26',
                       cursor: isExecuting ? 'not-allowed' : 'pointer'
                     }}
@@ -1334,9 +1752,7 @@ const SessionIDE = ({
                     <button
                       style={{
                         ...toolbarButtonBase,
-                        background: isBuilding
-                          ? 'rgba(148, 163, 184, 0.25)'
-                          : 'linear-gradient(135deg, #facc15 0%, #f97316 100%)',
+                        background: isBuilding ? 'rgba(148, 163, 184, 0.25)' : 'linear-gradient(135deg, #facc15 0%, #f97316 100%)',
                         borderColor: 'rgba(234, 179, 8, 0.6)',
                         color: '#1f2937',
                         cursor: isBuilding ? 'not-allowed' : 'pointer'
@@ -1351,9 +1767,7 @@ const SessionIDE = ({
                       <button
                         style={{
                           ...toolbarButtonBase,
-                          background: isExecuting
-                            ? 'rgba(148, 163, 184, 0.25)'
-                            : 'linear-gradient(135deg, #3b82f6 0%, #2563eb 100%)',
+                          background: isExecuting ? 'rgba(148, 163, 184, 0.25)' : 'linear-gradient(135deg, #3b82f6 0%, #2563eb 100%)',
                           borderColor: 'rgba(37, 99, 235, 0.6)',
                           color: '#f8fafc',
                           cursor: isExecuting ? 'not-allowed' : 'pointer'
@@ -1368,9 +1782,7 @@ const SessionIDE = ({
                     <button
                       style={{
                         ...toolbarButtonBase,
-                        background: isBuilding || isExecuting
-                          ? 'rgba(148, 163, 184, 0.25)'
-                          : 'linear-gradient(135deg, #ec4899 0%, #d946ef 100%)',
+                        background: isBuilding || isExecuting ? 'rgba(148, 163, 184, 0.25)' : 'linear-gradient(135deg, #ec4899 0%, #d946ef 100%)',
                         borderColor: 'rgba(190, 24, 93, 0.6)',
                         color: '#f8fafc',
                         cursor: isBuilding || isExecuting ? 'not-allowed' : 'pointer'
@@ -1384,20 +1796,18 @@ const SessionIDE = ({
                   </>
                 )}
               </div>
-              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'flex-end', gap: '0.75rem', flexWrap: 'wrap' }}>
-                <span style={{ color: autoSaveColor, fontSize: '0.8rem' }}>{autoSaveMessage}</span>
-                <div style={{ display: 'flex', gap: '0.3rem', flexWrap: 'wrap' }}>
-                  {(['editor-only', 'with-terminal'] as const).map(mode => (
-                    <button
-                      key={mode}
-                      onClick={() => setLayout(mode)}
-                      style={layoutButtonStyle(layout === mode)}
-                    >
-                      {mode === 'editor-only' ? 'Editor' : 'IDE + Terminal'}
-                    </button>
-                  ))}
-                </div>
+              <div style={{ display: 'flex', gap: '0.35rem' }}>
+                {(['editor-only', 'with-terminal'] as const).map(mode => (
+                  <button
+                    key={mode}
+                    onClick={() => setLayout(mode)}
+                    style={layoutButtonStyle(layout === mode)}
+                  >
+                    {mode === 'editor-only' ? 'Editor' : 'Editor + Terminal'}
+                  </button>
+                ))}
               </div>
+              <span style={{ color: autoSaveColor, fontSize: '0.75rem' }}>{autoSaveMessage}</span>
             </div>
           </div>
 
@@ -1407,152 +1817,155 @@ const SessionIDE = ({
                 backgroundColor: '#3e3e42',
                 color: '#fbbf24',
                 padding: '0.5rem 1rem',
-                fontSize: '0.8rem'
+                fontSize: '0.8rem',
+                borderBottom: '1px solid #1f1f1f'
               }}
             >
               {loadError}
             </div>
           )}
 
-          <div style={{ flex: 1 }}>
-            <Editor
-              language={currentLanguage}
-              theme={editorTheme}
-              value={currentContent}
-              onChange={handleChange}
-              onMount={handleEditorMount}
-              path={selectedFile || undefined}
-              options={{
-                minimap: { enabled: showMinimap },
-                fontSize: 14,
-                lineHeight: 20,
-                fontLigatures: true,
-                renderLineHighlight: 'line',
-                automaticLayout: true,
-                smoothScrolling: true,
-                scrollBeyondLastLine: false,
-                wordWrap: 'on',
-                tabSize: 4,
-                insertSpaces: true,
-                scrollbar: {
-                  verticalScrollbarSize: 10,
-                  horizontalScrollbarSize: 10
+          <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+            <div style={{ flex: 1, minHeight: 0 }}>
+              <Editor
+                language={currentLanguage}
+                theme={editorTheme}
+                value={currentContent}
+                onChange={handleChange}
+                onMount={handleEditorMount}
+                path={selectedFile || undefined}
+                options={{
+                  minimap: { enabled: showMinimap },
+                  fontSize: 14,
+                  lineHeight: 20,
+                  fontLigatures: true,
+                  renderLineHighlight: 'line',
+                  automaticLayout: true,
+                  smoothScrolling: true,
+                  scrollBeyondLastLine: false,
+                  wordWrap: 'on',
+                  tabSize: 4,
+                  insertSpaces: true,
+                  scrollbar: {
+                    verticalScrollbarSize: 10,
+                    horizontalScrollbarSize: 10
+                  }
+                }}
+                loading={
+                  <div style={{ color: '#a1a1aa', fontSize: '0.9rem', padding: '1rem' }}>
+                    Loading editor…
+                  </div>
                 }
-              }}
-              loading={
-                <div style={{ color: '#a1a1aa', fontSize: '0.9rem', padding: '1rem' }}>
-                  Loading editor…
-                </div>
-              }
-            />
-          </div>
-        </div>
-
-        {layout === 'with-terminal' && (
-          <div
-            style={{
-              height: isTerminalMinimized ? '40px' : `${terminalHeight}px`,
-              borderTop: '1px solid #3e3e42',
-              display: 'flex',
-              flexDirection: 'column',
-              transition: 'height 0.2s ease'
-            }}
-          >
-            {/* Terminal header with controls */}
-            <div
-              style={{
-                height: '40px',
-                borderBottom: isTerminalMinimized ? 'none' : '1px solid #3e3e42',
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'space-between',
-                padding: '0 1rem',
-                backgroundColor: '#1e1e1e'
-              }}
-            >
-              <span style={{ color: '#cccccc', fontSize: '0.9rem', fontWeight: 500 }}>
-                Terminal
-              </span>
-              <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center' }}>
-                {!isTerminalMinimized && (
-                  <>
-                    <button
-                      onClick={() => setTerminalHeight(Math.min(600, terminalHeight + 50))}
-                      style={{
-                        background: 'transparent',
-                        border: '1px solid #3e3e42',
-                        borderRadius: '4px',
-                        padding: '0.25rem 0.5rem',
-                        color: '#cccccc',
-                        cursor: 'pointer',
-                        fontSize: '0.75rem'
-                      }}
-                      title="Increase height"
-                    >
-                      ▲
-                    </button>
-                    <button
-                      onClick={() => setTerminalHeight(Math.max(100, terminalHeight - 50))}
-                      style={{
-                        background: 'transparent',
-                        border: '1px solid #3e3e42',
-                        borderRadius: '4px',
-                        padding: '0.25rem 0.5rem',
-                        color: '#cccccc',
-                        cursor: 'pointer',
-                        fontSize: '0.75rem'
-                      }}
-                      title="Decrease height"
-                    >
-                      ▼
-                    </button>
-                  </>
-                )}
-                <button
-                  onClick={() => setIsTerminalMinimized(!isTerminalMinimized)}
-                  style={{
-                    background: 'transparent',
-                    border: '1px solid #3e3e42',
-                    borderRadius: '4px',
-                    padding: '0.25rem 0.5rem',
-                    color: '#cccccc',
-                    cursor: 'pointer',
-                    fontSize: '0.75rem'
-                  }}
-                  title={isTerminalMinimized ? "Maximize" : "Minimize"}
-                >
-                  {isTerminalMinimized ? '□' : '_'}
-                </button>
-              </div>
+              />
             </div>
 
-            {/* Terminal content */}
-            {!isTerminalMinimized && (
-              <div style={{ flex: 1, overflow: 'hidden' }}>
-                <Terminal
-                  sessionId={sessionId}
-                  token={localStorage.getItem('token') || undefined}
-                  onCommand={handleTerminalCommand}
-                  height="100%"
-                />
-              </div>
-            )}
-
-            {!isTerminalMinimized && (
+            {layout === 'with-terminal' && (
               <div
                 style={{
-                  height: '8px',
-                  cursor: 'ns-resize',
-                  background: 'linear-gradient(90deg, rgba(148, 163, 184, 0.25), rgba(148, 163, 184, 0.05))'
+                  borderTop: '1px solid #1f1f1f',
+                  backgroundColor: '#1e1e1e',
+                  display: 'flex',
+                  flexDirection: 'column',
+                  height: isTerminalMinimized ? 40 : terminalHeight,
+                  minHeight: 40,
+                  transition: 'height 0.2s ease'
                 }}
-                onMouseDown={startTerminalResize}
-              />
+              >
+                <div
+                  style={{
+                    height: 38,
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'space-between',
+                    padding: '0 0.75rem',
+                    backgroundColor: '#252526',
+                    borderBottom: isTerminalMinimized ? 'none' : '1px solid #1f1f1f'
+                  }}
+                >
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '0.25rem' }}>
+                    {PANEL_TABS.map(tab => {
+                      const isActive = activePanelTab === tab;
+                      return (
+                        <button
+                          key={tab}
+                          style={panelTabStyle(isActive)}
+                          onClick={() => setActivePanelTab(tab)}
+                        >
+                          {tab.toUpperCase()}
+                        </button>
+                      );
+                    })}
+                  </div>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
+                    <button
+                      onClick={() => setIsTerminalMinimized(!isTerminalMinimized)}
+                      style={panelButtonStyle}
+                      title={isTerminalMinimized ? 'Restore panel' : 'Collapse panel'}
+                    >
+                      {isTerminalMinimized ? '▢' : '⌄'}
+                    </button>
+                    <button
+                      onClick={() => setTerminalHeight(Math.min(640, terminalHeight + 60))}
+                      style={panelButtonStyle}
+                      title="Increase height"
+                    >
+                      ＋
+                    </button>
+                    <button
+                      onClick={() => setTerminalHeight(Math.max(180, terminalHeight - 60))}
+                      style={panelButtonStyle}
+                      title="Decrease height"
+                    >
+                      －
+                    </button>
+                  </div>
+                </div>
+
+                {!isTerminalMinimized && (
+                  <div style={{ flex: 1, display: 'flex', backgroundColor: '#1e1e1e' }}>
+                    {activePanelTab === 'Terminal' ? (
+                      <Terminal
+                        sessionId={sessionId}
+                        token={localStorage.getItem('token') || undefined}
+                        onCommand={handleTerminalCommand}
+                        height="100%"
+                      />
+                    ) : (
+                      <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#9ca3af', fontSize: '0.85rem' }}>
+                        {`${activePanelTab} view coming soon`}
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {!isTerminalMinimized && (
+                  <div
+                    style={{
+                      height: '6px',
+                      cursor: 'ns-resize',
+                      background: 'linear-gradient(90deg, rgba(0, 122, 204, 0.35), rgba(0, 122, 204, 0.05))'
+                    }}
+                    onMouseDown={startTerminalResize}
+                  />
+                )}
+              </div>
             )}
           </div>
-        )}
-
-
+        </div>
       </div>
+
+      <footer style={statusBarStyle}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '1.25rem' }}>
+          {statusLeft.map((item, index) => (
+            <span key={`${item}-${index}`}>{item}</span>
+          ))}
+        </div>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '1rem' }}>
+          {statusRight.map((item, index) => (
+            <span key={`${item}-${index}`}>{item}</span>
+          ))}
+        </div>
+      </footer>
     </div>
   );
 };

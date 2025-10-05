@@ -24,3 +24,10 @@ export const register = async (payload: RegisterPayload): Promise<User> => {
   const { data } = await apiClient.post<User>('/v1/auth/register', payload);
   return data;
 };
+
+export const exchangeAuth0Token = async (auth0Token: string): Promise<AuthTokenResponse> => {
+  const { data } = await apiClient.post<AuthTokenResponse>('/v1/auth/auth0/exchange', {}, {
+    headers: { Authorization: `Bearer ${auth0Token}` }
+  });
+  return data;
+};

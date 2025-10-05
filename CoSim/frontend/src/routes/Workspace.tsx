@@ -1,23 +1,5 @@
-import { useEffect, us  // Handler to run code in simulator
-  const handleRunSimulation = async (code: string, modelPath?: string) => {
-    console.log('🎮 Running code in simulator...', { modelPath });
-    setCurrentSimulationCode(code);
-    setExecutionOutput({ status: 'running', timestamp: new Date().toISOString() });o, useState } from 'react';
-import { useQuery } from '@tanst      const result = await response.json();
-      console.log('✓ Simulation completed:', result);
-      
-      if (result.stdout) console.log('stdout:', result.stdout);
-      if (result.stderr) console.warn('stderr:', result.stderr);
-      if (result.error) console.error('Error:', result.error);
-      
-      // Store execution results in state
-      setExecutionOutput({
-        status: result.status === 'success' ? 'success' : 'error',
-        stdout: result.stdout,
-        stderr: result.stderr,
-        error: result.error,
-        timestamp: new Date().toISOString()
-      });act-query';
+import { useEffect, useMemo, useState } from 'react';
+import { useQuery } from '@tanstack/react-query';
 import { useParams, useNavigate } from 'react-router-dom';
 import { Activity, Box, Cpu, Maximize2, Minimize2, Monitor, Play, Zap } from 'lucide-react';
 
@@ -47,14 +29,37 @@ const WorkspacePage = () => {
 
   // Handler to run code in simulator
   const handleRunSimulation = async (code: string, modelPath?: string) => {
-    console.log('\ud83c\udfae Running code in simulator...', { modelPath });
+    console.log('🎮 Running code in simulator...', { modelPath });
     setCurrentSimulationCode(code);
+    setExecutionOutput({ status: 'running', timestamp: new Date().toISOString() });
     
     const simulationApiUrl = import.meta.env.VITE_SIMULATION_API_URL || 'http://localhost:8005';
     const sessionIdForSim = activeSessionId || 'default-session';
     
     try {
-      // Try to create simulation (gracefully handle if already exists)
+      // Get engine from project settings, default to mujoco
+      const engine = project?.settings?.engine || 'mujoco';
+      const defaultModelPath = engine === 'pybullet' 
+        ? '/app/templates/pybullet/cartpole.py'
+        : '/app/templates/mujoco/cartpole.xml';
+      
+      const finalModelPath = modelPath || defaultModelPath;
+      
+      // Delete existing simulation if it exists (to ensure clean state)
+      try {
+        await fetch(`${simulationApiUrl}/simulations/${sessionIdForSim}`, {
+          method: 'DELETE',
+          headers: {
+            'Content-Type': 'application/json',
+            ...(token && { 'Authorization': `Bearer ${token}` }),
+          },
+        });
+        console.log('🗑️ Deleted previous simulation session');
+      } catch (err) {
+        // Ignore errors if simulation doesn't exist
+      }
+      
+      // Create new simulation
       const createResponse = await fetch(`${simulationApiUrl}/simulations/create`, {
         method: 'POST',
         headers: {
@@ -63,8 +68,8 @@ const WorkspacePage = () => {
         },
         body: JSON.stringify({
           session_id: sessionIdForSim,
-          engine: 'mujoco',
-          model_path: modelPath || '/app/templates/mujoco/cartpole.xml',
+          engine,
+          model_path: finalModelPath,
           width: 800,
           height: 600,
           fps: 60,
@@ -75,19 +80,9 @@ const WorkspacePage = () => {
       if (createResponse.ok) {
         const createData = await createResponse.json();
         console.log('✅ Simulation created:', createData);
-      } else if (createResponse.status === 400) {
-        console.log('ℹ️ Simulation already exists, reusing existing session');
       } else {
-        console.warn('⚠️ Simulation creation returned:', createResponse.status);
-      }
-      
-      if (createResponse.ok) {
-        const createData = await createResponse.json();
-        console.log('✓ Simulation created:', createData);
-      } else if (createResponse.status === 400) {
-        console.log('ℹ️ Simulation already exists, reusing...');
-      } else {
-        console.warn('Simulation creation failed:', createResponse.status);
+        const errorData = await createResponse.json();
+        throw new Error(`Failed to create simulation: ${errorData.detail || createResponse.statusText}`);
       }
 
       // Execute code
@@ -110,12 +105,20 @@ const WorkspacePage = () => {
       }
 
       const result = await response.json();
-      console.log('\u2713 Simulation completed:', result);
+      console.log('✓ Simulation completed:', result);
       
       if (result.stdout) console.log('stdout:', result.stdout);
       if (result.stderr) console.warn('stderr:', result.stderr);
       if (result.error) console.error('Error:', result.error);
       
+      // Store execution results in state
+      setExecutionOutput({
+        status: result.status === 'success' ? 'success' : 'error',
+        stdout: result.stdout,
+        stderr: result.stderr,
+        error: result.error,
+        timestamp: new Date().toISOString()
+      });
     } catch (error) {
       console.error('Failed to run simulation:', error);
       setExecutionOutput({
@@ -350,7 +353,7 @@ const WorkspacePage = () => {
             <StatusCard
               icon={<Play size={18} />}
               label="Engine"
-              value="MuJoCo"
+              value={project?.settings?.engine === 'pybullet' ? 'PyBullet' : 'MuJoCo'}
               color="#ec4899"
             />
           </div>
@@ -359,36 +362,13 @@ const WorkspacePage = () => {
 
         {/* Main Content Area */}
         <div style={{
-          display: 'grid',
-          gridTemplateColumns: isSimExpanded ? '1fr' : 'minmax(0, 2fr) minmax(0, 1fr)',
-          gap: '1rem',
+          display: 'flex',
+          flexDirection: 'column',
           flex: 1,
-          overflow: 'hidden',
-          transition: 'grid-template-columns 0.3s ease'
+          gap: '1.25rem',
+          minHeight: 0,
+          overflowY: isFullscreen ? 'auto' : 'visible'
         }}>
-          {/* IDE Panel */}
-          {!isSimExpanded && (
-            <div style={{
-              borderRadius: '16px',
-              overflow: 'hidden',
-              boxShadow: '0 4px 20px rgba(0, 0, 0, 0.08)',
-              border: '1px solid #e2e8f0',
-              background: '#fff'
-            }}>
-              <SessionIDE
-                sessionId={activeSessionId ?? 'placeholder-session'}
-                workspaceId={activeWorkspaceId ?? 'placeholder-workspace'}
-                enableCollaboration={true}
-                onRunSimulation={handleRunSimulation}
-                onCodeChange={(code, filePath) => {
-                  // Store the current code for simulation
-                  setCurrentSimulationCode(code);
-                  console.log('Code updated for simulation:', filePath);
-                }}
-              />
-            </div>
-          )}
-
           {/* Simulation Panel */}
           <div style={{
             borderRadius: '16px',
@@ -397,7 +377,10 @@ const WorkspacePage = () => {
             border: '1px solid #e2e8f0',
             background: '#fff',
             display: 'flex',
-            flexDirection: 'column'
+            flexDirection: 'column',
+            flex: isSimExpanded ? 3 : 2,
+            minHeight: isSimExpanded ? '65vh' : '50vh',
+            transition: 'flex 0.3s ease, min-height 0.3s ease'
           }}>
             {/* Simulation Header */}
             <div style={{
@@ -503,11 +486,11 @@ const WorkspacePage = () => {
             </div>
 
             {/* Tab Content */}
-            <div style={{ flex: 1, overflow: 'hidden' }}>
+            <div style={{ flex: 1, overflow: 'hidden', minHeight: 0 }}>
               {activeTab === 'simulation' && (
                 <SimulationViewer
-                  sessionId={activeSessionId ?? 'placeholder-session'}
-                  engine="mujoco"
+                  sessionId={activeSessionId ?? 'default-session'}
+                  engine={(project?.settings?.engine as 'mujoco' | 'pybullet') || 'mujoco'}
                   height="100%"
                   executionOutput={executionOutput}
                   onRunCode={async () => {
@@ -526,6 +509,28 @@ const WorkspacePage = () => {
                 <LogsPanel />
               )}
             </div>
+          </div>
+          
+          {/* IDE Panel */}
+          <div style={{
+            borderRadius: '16px',
+            overflow: 'hidden',
+            boxShadow: '0 4px 20px rgba(0, 0, 0, 0.08)',
+            border: '1px solid #e2e8f0',
+            background: '#fff',
+            flex: isSimExpanded ? 4 : 5,
+            minHeight: '45vh',
+            display: 'flex'
+          }}>
+            <SessionIDE
+              sessionId={activeSessionId ?? 'placeholder-session'}
+              workspaceId={activeWorkspaceId ?? 'placeholder-workspace'}
+              enableCollaboration={true}
+              onRunSimulation={handleRunSimulation}
+              onCodeChange={(code, filePath) => {
+                setCurrentSimulationCode(code);
+              }}
+            />
           </div>
         </div>
       </div>
@@ -632,12 +637,6 @@ const WorkspaceSelector = ({ workspaces, isLoading, isError, activeWorkspaceId, 
     </div>
   );
 };
-
-interface WorkspaceStatusSummaryProps {
-  workspace: Workspace | null;
-  sessionCount: number;
-  sessionStatus?: Session['status'];
-}
 
 interface StatusCardProps {
   icon: React.ReactNode;
@@ -788,8 +787,8 @@ const LogsPanel = () => (
     </div>
     <div style={{ marginBottom: '0.5rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
       <span style={{ color: '#4ec9b0' }}>[09:45:25]</span>
-      <span style={{ color: '#dcdcaa' }}>WARN</span>
-      <span>Simulation stream not available</span>
+      <span style={{ color: '#ce9178' }}>INFO</span>
+      <span>Simulation engine ready</span>
     </div>
     <div style={{ marginBottom: '0.5rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
       <span style={{ color: '#4ec9b0' }}>[09:45:26]</span>
@@ -807,51 +806,6 @@ const LogsPanel = () => (
         📝 System logs and execution output will appear here in real-time.
       </p>
     </div>
-  </div>
-);
-
-interface SummaryBubbleProps {
-  label: string;
-  value: string;
-}
-
-const SummaryBubble = ({ label, value }: SummaryBubbleProps) => (
-  <div
-    style={{
-      flex: '0 1 220px',
-      borderRadius: '12px',
-      border: '1px solid #e2e8f0',
-      padding: '1rem',
-      background: 'linear-gradient(135deg, rgba(102, 126, 234, 0.08), rgba(118, 75, 162, 0.08))'
-    }}
-  >
-    <p style={{ margin: '0 0 0.25rem 0', fontSize: '0.8rem', textTransform: 'uppercase', letterSpacing: '0.05em', color: '#64748b' }}>
-      {label}
-    </p>
-    <p style={{ margin: 0, fontSize: '1.1rem', fontWeight: 600, color: '#312e81' }}>{value}</p>
-  </div>
-);
-
-const SimulationPlaceholder = () => (
-  <div
-    className="card"
-    style={{
-      height: '100%',
-      minHeight: '720px',
-      display: 'flex',
-      flexDirection: 'column',
-      justifyContent: 'center',
-      alignItems: 'center',
-      textAlign: 'center',
-      background: 'linear-gradient(135deg, #f8fafc 0%, #eef2ff 100%)',
-      border: '1px dashed rgba(102, 126, 234, 0.4)'
-    }}
-  >
-    <div style={{ fontSize: '3rem', marginBottom: '1rem' }}>🛰️</div>
-    <h2 style={{ margin: '0 0 0.5rem 0' }}>Simulation stream coming soon</h2>
-    <p style={{ margin: 0, maxWidth: '320px', color: '#475569' }}>
-      We&apos;ll render the shared MuJoCo/PyBullet simulation here once the streaming agents are wired up.
-    </p>
   </div>
 );
 

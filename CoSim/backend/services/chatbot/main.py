@@ -12,6 +12,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 import openai
 import ollama
+import replicate
 
 from vector_store import RAGVectorStore, initialize_vector_store
 
@@ -137,6 +138,20 @@ def generate_llm_response(
     Generate response using Ollama or OpenAI
     Tries Ollama first (local), falls back to OpenAI if configured
     """
+    # --- NEW: Try Replicate first for cloud deployments ---
+    replicate_api_token = os.getenv("REPLICATE_API_TOKEN")
+    if replicate_api_token:
+        print(f"🤖 Attempting to generate response using Replicate...")
+        try:
+            # Llama 3.1 8B Instruct model on Replicate
+            model_version = "meta/meta-llama-3.1-8b-instruct:63af552585433a13f5939888659445c2a7da55c8055284d4356a336053852005"
+            response = generate_replicate_response(query, context_docs, conversation_history, model_version)
+            print(f"✅ Successfully generated response using Replicate!")
+            return response
+        except Exception as e:
+            print(f"❌ Replicate failed: {e}, trying other options...")
+
+
     # Try Ollama first (local LLM)
     ollama_host = os.getenv("OLLAMA_HOST", "http://host.docker.internal:11434")
     ollama_model = os.getenv("OLLAMA_MODEL", "llama3.2")
@@ -218,6 +233,52 @@ def generate_ollama_response(
     )
     
     return response['message']['content']
+
+
+def generate_replicate_response(
+    query: str,
+    context_docs: List[Dict[str, Any]],
+    conversation_history: List[ChatMessage] = None,
+    model_version: str = "meta/meta-llama-3.1-8b-instruct:63af552585433a13f5939888659445c2a7da55c8055284d4356a336053852005"
+) -> str:
+    """
+    Generate response using a serverless model host like Replicate.
+    """
+    # Format context
+    context_text = "\n\n".join([
+        f"Source [{doc['metadata'].get('section', 'Unknown')}]:\n{doc['content']}"
+        for doc in context_docs
+    ])
+
+    # Build conversation history for the prompt
+    messages = []
+    system_prompt = (
+        "You are a helpful assistant for CoSim, a cloud-based collaborative "
+        "robotics development platform. Answer questions about CoSim's features, "
+        "capabilities, pricing, and how to use it. Use the provided context to "
+        "give accurate answers. Be concise but informative. If you don't know "
+        "something, say so politely."
+    )
+    messages.append({"role": "system", "content": system_prompt})
+
+    if conversation_history:
+        for msg in conversation_history[-5:]:  # Last 5 messages
+            messages.append({"role": msg.role, "content": msg.content})
+
+    # Add context and current query
+    user_prompt = f"Context:\n{context_text}\n\nQuestion: {query}"
+    messages.append({"role": "user", "content": user_prompt})
+
+    # Call Replicate API
+    output = replicate.run(
+        model_version,
+        input={"messages": messages}
+    )
+
+    # The output is an iterator, concatenate it to get the full response
+    response_text = "".join(list(output))
+
+    return response_text
 
 
 def generate_openai_response(

@@ -2,6 +2,7 @@ import { Navigate, Route, Routes } from 'react-router-dom';
 
 import { useAuth } from './hooks/useAuth';
 import LoginPage from './routes/Login';
+import CallbackPage from './routes/Callback';
 import ProjectsPage from './routes/Projects';
 import WorkspacePage from './routes/Workspace';
 import SessionPage from './routes/Session';
@@ -11,12 +12,25 @@ import SettingsPage from './routes/Settings';
 import PricingPage from './routes/Pricing';
 
 const App = () => {
-  const { token } = useAuth();
+  const { token, isLoading } = useAuth();
+
+  // Show loading screen while Auth0 is initializing
+  if (isLoading) {
+    return (
+      <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', height: '100vh' }}>
+        <div style={{ textAlign: 'center' }}>
+          <div style={{ fontSize: '2rem', marginBottom: '1rem' }}>🤖</div>
+          <p style={{ color: '#64748b' }}>Loading CoSim...</p>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <Routes>
       <Route path="/" element={<LandingPage />} />
       <Route path="/login" element={<LoginPage />} />
+      <Route path="/callback" element={<CallbackPage />} />
       <Route path="/pricing" element={<PricingPage />} />
       <Route
         path="/projects"

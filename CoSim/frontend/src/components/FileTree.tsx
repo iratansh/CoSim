@@ -19,7 +19,7 @@ interface FileTreeProps {
 
 export const FileTree = ({ files, selectedFile, onFileSelect, onCreateFile }: FileTreeProps) => {
   return (
-    <div className="file-tree">
+    <div className="file-tree" style={{ display: 'flex', flexDirection: 'column', gap: '0.15rem' }}>
       {files.map(node => (
         <TreeNode
           key={node.id}
@@ -44,6 +44,7 @@ interface TreeNodeProps {
 
 const TreeNode = ({ node, level, selectedFile, onFileSelect, onCreateFile }: TreeNodeProps) => {
   const [isExpanded, setIsExpanded] = useState(level === 0);
+  const [isHovered, setIsHovered] = useState(false);
   const isSelected = node.path === selectedFile;
   const hasChildren = node.children && node.children.length > 0;
 
@@ -63,11 +64,14 @@ const TreeNode = ({ node, level, selectedFile, onFileSelect, onCreateFile }: Tre
   };
 
   const getFileColor = () => {
-    if (node.type === 'directory') return '#3b82f6';
-    if (node.language === 'python') return '#3b82f6';
-    if (node.language === 'cpp') return '#06b6d4';
-    return '#64748b';
+    if (node.type === 'directory') return '#90caf9';
+    if (node.language === 'python') return '#ffd166';
+    if (node.language === 'cpp') return '#6ee7b7';
+    return '#a6accd';
   };
+
+  const backgroundColor = isSelected ? '#37373d' : isHovered ? 'rgba(42, 45, 46, 0.75)' : 'transparent';
+  const textColor = isSelected ? '#f3f4f6' : '#d4d4d8';
 
   return (
     <div>
@@ -75,19 +79,22 @@ const TreeNode = ({ node, level, selectedFile, onFileSelect, onCreateFile }: Tre
         onClick={handleClick}
         className={`tree-node ${isSelected ? 'selected' : ''}`}
         style={{
-          paddingLeft: `${level * 16 + 8}px`,
+          paddingLeft: `${level * 14 + 10}px`,
           display: 'flex',
           alignItems: 'center',
           gap: '0.5rem',
-          padding: '0.4rem 0.5rem',
+          padding: '0.32rem 0.5rem',
           cursor: 'pointer',
           userSelect: 'none',
-          backgroundColor: isSelected ? '#3b82f620' : 'transparent',
-          borderLeft: isSelected ? '3px solid #3b82f6' : '3px solid transparent'
+          backgroundColor,
+          borderLeft: isSelected ? '2px solid #007acc' : '2px solid transparent',
+          transition: 'background-color 0.15s ease'
         }}
+        onMouseEnter={() => setIsHovered(true)}
+        onMouseLeave={() => setIsHovered(false)}
       >
         {node.type === 'directory' && (
-          <span style={{ display: 'flex', alignItems: 'center' }}>
+          <span style={{ display: 'flex', alignItems: 'center', color: '#9da5b4' }}>
             {isExpanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
           </span>
         )}
@@ -95,7 +102,17 @@ const TreeNode = ({ node, level, selectedFile, onFileSelect, onCreateFile }: Tre
         <span style={{ color: getFileColor(), display: 'flex', alignItems: 'center' }}>
           {getFileIcon()}
         </span>
-        <span style={{ fontSize: '0.9rem', color: '#1e293b' }}>{node.name}</span>
+        <span
+          style={{
+            fontSize: '0.85rem',
+            color: textColor,
+            overflow: 'hidden',
+            textOverflow: 'ellipsis',
+            whiteSpace: 'nowrap'
+          }}
+        >
+          {node.name}
+        </span>
       </div>
       {node.type === 'directory' && isExpanded && hasChildren && (
         <div>
