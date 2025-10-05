@@ -24,9 +24,9 @@ export const AuthProvider = ({ children }: Props) => {
   const {
     isAuthenticated: auth0IsAuthenticated,
     isLoading: auth0IsLoading,
-    getAccessTokenSilently,
     logout: auth0Logout,
     user: auth0User,
+    getIdTokenClaims,
   } = useAuth0();
 
   const [token, setToken] = useState<string | null>(null);
@@ -68,10 +68,15 @@ export const AuthProvider = ({ children }: Props) => {
 
       if (auth0IsAuthenticated && !auth0IsLoading) {
         try {
-          const auth0AccessToken = await getAccessTokenSilently();
-          
-          // Exchange Auth0 token for backend token
-          const { access_token: backendToken } = await exchangeAuth0Token(auth0AccessToken);
+          const claims = await getIdTokenClaims();
+          const auth0IdToken = claims?.__raw;
+
+          if (!auth0IdToken) {
+            throw new Error('Missing Auth0 ID token');
+          }
+
+          // Exchange Auth0 ID token for backend token
+          const { access_token: backendToken } = await exchangeAuth0Token(auth0IdToken);
           
           setToken(backendToken);
           setAuthSource('auth0');
@@ -94,7 +99,7 @@ export const AuthProvider = ({ children }: Props) => {
     };
 
     syncAuth0Token();
-  }, [auth0IsAuthenticated, auth0IsLoading, authSource, getAccessTokenSilently]);
+  }, [auth0IsAuthenticated, auth0IsLoading, authSource, getIdTokenClaims]);
 
   // Fetch user profile from backend when we have a token
   useEffect(() => {

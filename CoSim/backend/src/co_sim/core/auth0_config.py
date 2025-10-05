@@ -55,7 +55,11 @@ class Auth0Settings(BaseSettings):
         """Return the configured audience or default userinfo audience."""
         if not self.auth0_domain:
             return None
-        return self.auth0_audience or f"https://{self.auth0_domain}/userinfo"
+        if self.auth0_audience:
+            return self.auth0_audience
+        if self.auth0_client_id:
+            return self.auth0_client_id
+        return f"https://{self.auth0_domain}/userinfo"
 
 
 @lru_cache

@@ -55,6 +55,7 @@ async def exchange_auth0_token(
     """
     auth0_id = auth0_user.get("sub")
     email = auth0_user.get("email")
+    email_verified = bool(auth0_user.get("email_verified", False))
     
     if not auth0_id or not email:
         raise HTTPException(
@@ -62,23 +63,56 @@ async def exchange_auth0_token(
             detail="Invalid Auth0 token: missing sub or email",
         )
     
-    # Look for existing user by Auth0 ID (stored in email or a dedicated field)
-    # For now, we'll use email as the lookup
-    result = await session.execute(select(User).where(User.email == email.lower()))
-    user = result.scalar_one_or_none()
+    # Look for existing user by Auth0 ID first, then fall back to email (backwards compatibility)
+    user = None
+    if auth0_id:
+        result = await session.execute(select(User).where(User.external_id == auth0_id))
+        user = result.scalar_one_or_none()
+
+    if not user:
+        result = await session.execute(select(User).where(User.email == email.lower()))
+        user = result.scalar_one_or_none()
     
     # Create user if doesn't exist
     if not user:
         user = User(
             email=email.lower(),
             full_name=auth0_user.get("name") or auth0_user.get("nickname"),
-            hashed_password="",  # Auth0 users don't have passwords in our system
+            hashed_password=None,  # Auth0 users don't have passwords in our system
+            external_id=auth0_id,
+            email_verified=email_verified,
             is_active=True,
             plan="free",  # Default plan for new Auth0 users
         )
         session.add(user)
         await session.commit()
         await session.refresh(user)
+    else:
+        updated = False
+        if auth0_id and user.external_id != auth0_id:
+            user.external_id = auth0_id
+            updated = True
+        normalized_email = email.lower()
+        if normalized_email and user.email != normalized_email:
+            user.email = normalized_email
+            updated = True
+        full_name = auth0_user.get("name") or auth0_user.get("nickname")
+        if full_name and user.full_name != full_name:
+            user.full_name = full_name
+            updated = True
+        if user.email_verified != email_verified:
+            user.email_verified = email_verified
+            updated = True
+        if user.hashed_password not in (None, ""):
+            user.hashed_password = None
+            updated = True
+        elif user.hashed_password == "":
+            user.hashed_password = None
+            updated = True
+
+        if updated:
+            await session.commit()
+            await session.refresh(user)
     
     # Generate our backend JWT
     token, expires_in = create_access_token(subject=user.id)
