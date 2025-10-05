@@ -17,6 +17,10 @@ export interface Project {
   organization_id: string;
   template_id?: string | null;
   created_by_id?: string | null;
+  settings: {
+    engine?: 'mujoco' | 'pybullet';
+    [key: string]: any;
+  };
   created_at: string;
   updated_at: string;
 }

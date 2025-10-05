@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useEffect, useState } from 'react';
-import { Link } from 'react-router-dom';
+import { useNavigate } from 'react-router-dom';
 
 import { fetchProjects } from '../api/projects';
 import { fetchOrganizations, createOrganization } from '../api/organizations';
@@ -53,6 +53,7 @@ interface CreateProjectPayload {
   organization_id: string;
   slug: string;
   template_id?: string;
+  selectedTemplate?: string | null;  // For determining engine
 }
 
 const TEMPLATES = [
@@ -93,11 +94,14 @@ const TEMPLATES = [
 const ProjectsPage = () => {
   const { token } = useAuth();
   const queryClient = useQueryClient();
+  const navigate = useNavigate();
   const [showModal, setShowModal] = useState(false);
   const [projectName, setProjectName] = useState('');
   const [projectDescription, setProjectDescription] = useState('');
   const [selectedTemplate, setSelectedTemplate] = useState<string | null>(null);
   const [selectedOrgId, setSelectedOrgId] = useState<string | null>(null);
+  const [contextMenu, setContextMenu] = useState<{ project: Project; x: number; y: number } | null>(null);
+  const [deletingProjectId, setDeletingProjectId] = useState<string | null>(null);
 
   const { data: projects, isLoading, isError } = useQuery<Project[]>({
     queryKey: ['projects'],
@@ -107,38 +111,38 @@ const ProjectsPage = () => {
   const { data: organizations } = useQuery<Organization[]>({
     queryKey: ['organizations'],
     queryFn: () => fetchOrganizations(token!),
+    enabled: Boolean(token)
   });
 
-  const createOrganizationMutation = useMutation({
-    mutationFn: () =>
-      createOrganization(token!, {
-        name: 'Default Organization',
-        slug: 'default-organization'
-      }),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['organizations'] });
-    },
-    onError: () => {
-      // It's safe to ignore errors here; the organization likely already exists or the user lacks permission.
-    }
-  });
-
+  // Auto-select first organization if available
   useEffect(() => {
-    if (organizations && organizations.length > 0) {
-      setSelectedOrgId((prev) => prev ?? organizations[0].id);
-    } else if (
-      organizations &&
-      organizations.length === 0 &&
-      !createOrganizationMutation.isPending &&
-      !createOrganizationMutation.isSuccess
-    ) {
-      createOrganizationMutation.mutate();
+    if (organizations && organizations.length > 0 && !selectedOrgId) {
+      setSelectedOrgId(organizations[0].id);
     }
-  }, [organizations, createOrganizationMutation]);
+  }, [organizations, selectedOrgId]);
 
   const createProjectMutation = useMutation({
     mutationFn: async (payload: CreateProjectPayload) => {
-      const { data } = await authorizedClient(token!).post<Project>('/v1/projects', payload);
+      // Determine engine based on selected template (not template_id which is a UUID)
+      const engine = payload.selectedTemplate === 'rl-pybullet' ? 'pybullet' : 'mujoco';
+      console.log('🔍 Creating project with selected template:', payload.selectedTemplate);
+      console.log('🔍 Determined engine:', engine);
+      
+      // Remove selectedTemplate from payload before sending to API
+      const { selectedTemplate, ...apiPayload } = payload;
+      
+      const payloadWithSettings = {
+        ...apiPayload,
+        settings: { engine }
+      };
+      
+      console.log('🔍 Final payload:', JSON.stringify(payloadWithSettings, null, 2));
+      
+      const { data } = await authorizedClient(token!).post<Project>('/v1/projects', payloadWithSettings);
+      
+      console.log('✅ Project created:', data);
+      console.log('✅ Project settings:', data.settings);
+      
       return data;
     },
     onSuccess: () => {
@@ -152,17 +156,64 @@ const ProjectsPage = () => {
 
   const handleCreateProject = (e: React.FormEvent) => {
     e.preventDefault();
-    if (!projectName.trim() || !selectedOrgId) {
-      return;
+    if (projectName.trim() && selectedOrgId) {
+      // Generate slug from project name
+      const slug = projectName.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+      
+      createProjectMutation.mutate({
+        name: projectName,
+        description: projectDescription,
+        organization_id: selectedOrgId,
+        slug: slug,
+        template_id: undefined,  // Don't send template_id since we're using settings.engine instead
+        selectedTemplate: selectedTemplate  // Pass this for engine determination
+      } as CreateProjectPayload);
+    } else if (!selectedOrgId) {
+      alert('Please select an organization first');
+    }
+  };
+
+  const deleteProjectMutation = useMutation({
+    mutationFn: async (projectId: string) => {
+      setDeletingProjectId(projectId);
+      await authorizedClient(token!).delete(`/v1/projects/${projectId}`);
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['projects'] });
+      setContextMenu(null);
+    },
+    onSettled: () => {
+      setDeletingProjectId(null);
+    }
+  });
+
+  useEffect(() => {
+    const handleDismiss = () => setContextMenu(null);
+    const handleEscape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        setContextMenu(null);
+      }
+    };
+
+    if (contextMenu) {
+      window.addEventListener('click', handleDismiss);
+      window.addEventListener('contextmenu', handleDismiss);
+      window.addEventListener('keydown', handleEscape);
     }
 
-    createProjectMutation.mutate({
-      name: projectName.trim(),
-      description: projectDescription.trim() || undefined,
-      organization_id: selectedOrgId,
-      slug: slugify(projectName),
-      template_id: undefined,
-    });
+    return () => {
+      window.removeEventListener('click', handleDismiss);
+      window.removeEventListener('contextmenu', handleDismiss);
+      window.removeEventListener('keydown', handleEscape);
+    };
+  }, [contextMenu]);
+
+  const confirmDeleteProject = (project: Project) => {
+    if (!token) return;
+    const confirmed = window.confirm(`Delete project "${project.name}"? This cannot be undone.`);
+    if (confirmed) {
+      deleteProjectMutation.mutate(project.id);
+    }
   };
 
   return (
@@ -277,35 +328,42 @@ const ProjectsPage = () => {
             gap: '1.5rem'
           }}>
             {projects.map(project => (
-              <Link
+              <div
                 key={project.id}
-                to={`/projects/${project.id}`}
+                role="button"
+                tabIndex={0}
+                className="card"
                 style={{
-                  textDecoration: 'none',
-                  color: 'inherit'
+                  height: '100%',
+                  transition: 'all 0.3s ease',
+                  cursor: 'pointer',
+                  position: 'relative',
+                  overflow: 'hidden',
+                  border: '1px solid #e2e8f0'
+                }}
+                onClick={() => navigate(`/projects/${project.id}`)}
+                onKeyDown={(event) => {
+                  if (event.key === 'Enter' || event.key === ' ') {
+                    event.preventDefault();
+                    navigate(`/projects/${project.id}`);
+                  }
+                }}
+                onContextMenu={(event) => {
+                  event.preventDefault();
+                  event.stopPropagation();
+                  setContextMenu({ project, x: event.clientX, y: event.clientY });
+                }}
+                onMouseOver={(e) => {
+                  e.currentTarget.style.transform = 'translateY(-4px)';
+                  e.currentTarget.style.boxShadow = '0 12px 32px rgba(15, 23, 42, 0.12)';
+                  e.currentTarget.style.borderColor = '#667eea';
+                }}
+                onMouseOut={(e) => {
+                  e.currentTarget.style.transform = 'translateY(0)';
+                  e.currentTarget.style.boxShadow = '0 4px 24px rgba(15, 23, 42, 0.06)';
+                  e.currentTarget.style.borderColor = '#e2e8f0';
                 }}
               >
-                <div
-                  className="card"
-                  style={{
-                    height: '100%',
-                    transition: 'all 0.3s ease',
-                    cursor: 'pointer',
-                    position: 'relative',
-                    overflow: 'hidden',
-                    border: '1px solid #e2e8f0'
-                  }}
-                  onMouseOver={(e) => {
-                    e.currentTarget.style.transform = 'translateY(-4px)';
-                    e.currentTarget.style.boxShadow = '0 12px 32px rgba(15, 23, 42, 0.12)';
-                    e.currentTarget.style.borderColor = '#667eea';
-                  }}
-                  onMouseOut={(e) => {
-                    e.currentTarget.style.transform = 'translateY(0)';
-                    e.currentTarget.style.boxShadow = '0 4px 24px rgba(15, 23, 42, 0.06)';
-                    e.currentTarget.style.borderColor = '#e2e8f0';
-                  }}
-                >
                   {/* Gradient accent */}
                   <div style={{
                     position: 'absolute',
@@ -315,6 +373,27 @@ const ProjectsPage = () => {
                     height: '4px',
                     background: 'linear-gradient(90deg, #667eea 0%, #764ba2 100%)'
                   }} />
+                  <button
+                    type="button"
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      setContextMenu({ project, x: event.clientX, y: event.clientY });
+                    }}
+                    style={{
+                      position: 'absolute',
+                      top: '0.5rem',
+                      right: '0.5rem',
+                      border: 'none',
+                      background: 'rgba(15, 23, 42, 0.05)',
+                      borderRadius: '6px',
+                      padding: '0.35rem',
+                      cursor: 'pointer',
+                      color: '#475569'
+                    }}
+                    aria-label={`Project actions for ${project.name}`}
+                  >
+                    ⋮
+                  </button>
                   
                   <div style={{ paddingTop: '0.5rem' }}>
                     <div style={{
@@ -399,11 +478,79 @@ const ProjectsPage = () => {
                     </div>
                   </div>
                 </div>
-              </Link>
-            ))}
+              ))}
           </div>
         )}
       </div>
+
+      {contextMenu && (
+        <div
+          style={{
+            position: 'fixed',
+            top: contextMenu.y,
+            left: contextMenu.x,
+            transform: 'translate(0, 8px)',
+            zIndex: 9999
+          }}
+          onClick={(event) => event.stopPropagation()}
+        >
+          <div
+            style={{
+              minWidth: '220px',
+              background: '#ffffff',
+              borderRadius: '12px',
+              boxShadow: '0 20px 45px rgba(15, 23, 42, 0.18)',
+              border: '1px solid #e2e8f0',
+              padding: '0.5rem'
+            }}
+          >
+            <div style={{ padding: '0.5rem 0.75rem', borderBottom: '1px solid #e2e8f0' }}>
+              <div style={{ fontSize: '0.8rem', textTransform: 'uppercase', color: '#64748b', letterSpacing: '0.08em' }}>
+                {contextMenu.project.name}
+              </div>
+              <div style={{ fontSize: '0.75rem', color: '#94a3b8' }}>Project actions</div>
+            </div>
+            <button
+              type="button"
+              onClick={() => {
+                setContextMenu(null);
+                navigate(`/projects/${contextMenu.project.id}`);
+              }}
+              style={{
+                width: '100%',
+                border: 'none',
+                background: 'transparent',
+                textAlign: 'left',
+                padding: '0.6rem 0.75rem',
+                fontSize: '0.9rem',
+                color: '#1f2937',
+                cursor: 'pointer',
+                borderRadius: '8px'
+              }}
+            >
+              Open project
+            </button>
+            <button
+              type="button"
+              onClick={() => confirmDeleteProject(contextMenu.project)}
+              disabled={deleteProjectMutation.isPending && deletingProjectId === contextMenu.project.id}
+              style={{
+                width: '100%',
+                border: 'none',
+                background: 'transparent',
+                textAlign: 'left',
+                padding: '0.6rem 0.75rem',
+                fontSize: '0.9rem',
+                color: '#b91c1c',
+                cursor: 'pointer',
+                borderRadius: '8px'
+              }}
+            >
+              {deleteProjectMutation.isPending && deletingProjectId === contextMenu.project.id ? 'Deleting…' : 'Delete project'}
+            </button>
+          </div>
+        </div>
+      )}
 
       {/* Create Project Modal */}
       {showModal && (
@@ -492,47 +639,6 @@ const ProjectsPage = () => {
                     borderRadius: '8px'
                   }}
                 />
-              </div>
-
-              <div style={{ marginBottom: '1.5rem' }}>
-                <label style={{
-                  display: 'block',
-                  marginBottom: '0.5rem',
-                  fontWeight: 600,
-                  color: '#1e293b'
-                }}>
-                  Organization *
-                </label>
-                {organizations && organizations.length > 0 ? (
-                  <select
-                    value={selectedOrgId ?? ''}
-                    onChange={(e) => setSelectedOrgId(e.target.value)}
-                    style={{
-                      width: '100%',
-                      padding: '0.75rem',
-                      fontSize: '1rem',
-                      border: '2px solid #e2e8f0',
-                      borderRadius: '8px',
-                      background: '#fff'
-                    }}
-                  >
-                    {organizations.map((org) => (
-                      <option key={org.id} value={org.id}>
-                        {org.name}
-                      </option>
-                    ))}
-                  </select>
-                ) : (
-                  <div style={{
-                    padding: '0.75rem',
-                    border: '2px dashed #cbd5f5',
-                    borderRadius: '8px',
-                    color: '#64748b',
-                    background: '#f8fafc'
-                  }}>
-                    Preparing your organization workspace...
-                  </div>
-                )}
               </div>
 
               <div style={{ marginBottom: '1.5rem' }}>
@@ -641,7 +747,7 @@ const ProjectsPage = () => {
                 <button
                   type="submit"
                   className="primary-button"
-                  disabled={createProjectMutation.isPending || !selectedOrgId}
+                  disabled={createProjectMutation.isPending}
                   style={{
                     display: 'inline-flex',
                     alignItems: 'center',
@@ -698,12 +804,3 @@ const ProjectsPage = () => {
 };
 
 export default ProjectsPage;
-
-const slugify = (value: string): string => {
-  const base = value
-    .toLowerCase()
-    .trim()
-    .replace(/[^a-z0-9]+/g, '-')
-    .replace(/(^-|-$)+/g, '');
-  return base.length > 0 ? base : `project-${Date.now()}`;
-};

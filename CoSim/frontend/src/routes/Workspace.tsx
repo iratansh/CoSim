@@ -37,7 +37,29 @@ const WorkspacePage = () => {
     const sessionIdForSim = activeSessionId || 'default-session';
     
     try {
-      // Try to create simulation (gracefully handle if already exists)
+      // Get engine from project settings, default to mujoco
+      const engine = project?.settings?.engine || 'mujoco';
+      const defaultModelPath = engine === 'pybullet' 
+        ? '/app/templates/pybullet/cartpole.py'
+        : '/app/templates/mujoco/cartpole.xml';
+      
+      const finalModelPath = modelPath || defaultModelPath;
+      
+      // Delete existing simulation if it exists (to ensure clean state)
+      try {
+        await fetch(`${simulationApiUrl}/simulations/${sessionIdForSim}`, {
+          method: 'DELETE',
+          headers: {
+            'Content-Type': 'application/json',
+            ...(token && { 'Authorization': `Bearer ${token}` }),
+          },
+        });
+        console.log('🗑️ Deleted previous simulation session');
+      } catch (err) {
+        // Ignore errors if simulation doesn't exist
+      }
+      
+      // Create new simulation
       const createResponse = await fetch(`${simulationApiUrl}/simulations/create`, {
         method: 'POST',
         headers: {
@@ -46,8 +68,8 @@ const WorkspacePage = () => {
         },
         body: JSON.stringify({
           session_id: sessionIdForSim,
-          engine: 'mujoco',
-          model_path: modelPath || '/app/templates/mujoco/cartpole.xml',
+          engine,
+          model_path: finalModelPath,
           width: 800,
           height: 600,
           fps: 60,
@@ -58,10 +80,9 @@ const WorkspacePage = () => {
       if (createResponse.ok) {
         const createData = await createResponse.json();
         console.log('✅ Simulation created:', createData);
-      } else if (createResponse.status === 400) {
-        console.log('ℹ️ Simulation already exists, reusing existing session');
       } else {
-        console.warn('⚠️ Simulation creation returned:', createResponse.status);
+        const errorData = await createResponse.json();
+        throw new Error(`Failed to create simulation: ${errorData.detail || createResponse.statusText}`);
       }
 
       // Execute code
@@ -332,7 +353,7 @@ const WorkspacePage = () => {
             <StatusCard
               icon={<Play size={18} />}
               label="Engine"
-              value="MuJoCo"
+              value={project?.settings?.engine === 'pybullet' ? 'PyBullet' : 'MuJoCo'}
               color="#ec4899"
             />
           </div>
@@ -341,36 +362,13 @@ const WorkspacePage = () => {
 
         {/* Main Content Area */}
         <div style={{
-          display: 'grid',
-          gridTemplateColumns: isSimExpanded ? '1fr' : 'minmax(0, 2fr) minmax(0, 1fr)',
-          gap: '1rem',
+          display: 'flex',
+          flexDirection: 'column',
           flex: 1,
-          overflow: 'hidden',
-          transition: 'grid-template-columns 0.3s ease'
+          gap: '1.25rem',
+          minHeight: 0,
+          overflowY: isFullscreen ? 'auto' : 'visible'
         }}>
-          {/* IDE Panel */}
-          {!isSimExpanded && (
-            <div style={{
-              borderRadius: '16px',
-              overflow: 'hidden',
-              boxShadow: '0 4px 20px rgba(0, 0, 0, 0.08)',
-              border: '1px solid #e2e8f0',
-              background: '#fff'
-            }}>
-              <SessionIDE
-                sessionId={activeSessionId ?? 'placeholder-session'}
-                workspaceId={activeWorkspaceId ?? 'placeholder-workspace'}
-                enableCollaboration={true}
-                onRunSimulation={handleRunSimulation}
-                onCodeChange={(code, filePath) => {
-                  // Store the current code for simulation
-                  setCurrentSimulationCode(code);
-                  console.log('Code updated for simulation:', filePath);
-                }}
-              />
-            </div>
-          )}
-
           {/* Simulation Panel */}
           <div style={{
             borderRadius: '16px',
@@ -379,7 +377,10 @@ const WorkspacePage = () => {
             border: '1px solid #e2e8f0',
             background: '#fff',
             display: 'flex',
-            flexDirection: 'column'
+            flexDirection: 'column',
+            flex: isSimExpanded ? 3 : 2,
+            minHeight: isSimExpanded ? '65vh' : '50vh',
+            transition: 'flex 0.3s ease, min-height 0.3s ease'
           }}>
             {/* Simulation Header */}
             <div style={{
@@ -485,11 +486,11 @@ const WorkspacePage = () => {
             </div>
 
             {/* Tab Content */}
-            <div style={{ flex: 1, overflow: 'hidden' }}>
+            <div style={{ flex: 1, overflow: 'hidden', minHeight: 0 }}>
               {activeTab === 'simulation' && (
                 <SimulationViewer
-                  sessionId={activeSessionId ?? 'placeholder-session'}
-                  engine="mujoco"
+                  sessionId={activeSessionId ?? 'default-session'}
+                  engine={(project?.settings?.engine as 'mujoco' | 'pybullet') || 'mujoco'}
                   height="100%"
                   executionOutput={executionOutput}
                   onRunCode={async () => {
@@ -508,6 +509,28 @@ const WorkspacePage = () => {
                 <LogsPanel />
               )}
             </div>
+          </div>
+          
+          {/* IDE Panel */}
+          <div style={{
+            borderRadius: '16px',
+            overflow: 'hidden',
+            boxShadow: '0 4px 20px rgba(0, 0, 0, 0.08)',
+            border: '1px solid #e2e8f0',
+            background: '#fff',
+            flex: isSimExpanded ? 4 : 5,
+            minHeight: '45vh',
+            display: 'flex'
+          }}>
+            <SessionIDE
+              sessionId={activeSessionId ?? 'placeholder-session'}
+              workspaceId={activeWorkspaceId ?? 'placeholder-workspace'}
+              enableCollaboration={true}
+              onRunSimulation={handleRunSimulation}
+              onCodeChange={(code, filePath) => {
+                setCurrentSimulationCode(code);
+              }}
+            />
           </div>
         </div>
       </div>
@@ -764,8 +787,8 @@ const LogsPanel = () => (
     </div>
     <div style={{ marginBottom: '0.5rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
       <span style={{ color: '#4ec9b0' }}>[09:45:25]</span>
-      <span style={{ color: '#dcdcaa' }}>WARN</span>
-      <span>Simulation stream not available</span>
+      <span style={{ color: '#ce9178' }}>INFO</span>
+      <span>Simulation engine ready</span>
     </div>
     <div style={{ marginBottom: '0.5rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
       <span style={{ color: '#4ec9b0' }}>[09:45:26]</span>
